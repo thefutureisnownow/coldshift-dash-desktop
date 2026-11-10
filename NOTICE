@@ -1,0 +1,16 @@
+Coldshift Dash desktop
+Copyright (c) 2026 The Future is Now-Now (PTY) Ltd. The source in this repository is under the MIT License (LICENSE).
+
+The packaged app (the .dmg on GitHub Releases) also contains:
+
+- Python (PSF License)
+- Qt and PySide6, the window (LGPL-3.0; as separate libraries inside the app, which can be replaced)
+- mutagen, reading music tags (GPL-2.0-or-later)
+- Pillow, pictures (MIT-CMU)
+- pyosmium and libosmium, reading OpenStreetMap data for place search (BSD-2-Clause, Boost Software License)
+
+Because mutagen is under the GPL, the packaged app as a whole is distributed under the terms of the GNU GPL
+version 2 or later; its complete source is this repository and the libraries above, as published by their authors.
+
+assets/ holds copies of the car app's brand, built-in profile and voice pack (from coldshift-dash), its own work.
+Map data and place search: © OpenStreetMap contributors (ODbL), maps by Mapsforge, routing tiles by BRouter.

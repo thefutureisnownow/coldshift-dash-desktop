@@ -1,0 +1,4 @@
+mutagen>=1.47
+Pillow>=10
+PySide6-Essentials>=6.10
+osmium>=4.0

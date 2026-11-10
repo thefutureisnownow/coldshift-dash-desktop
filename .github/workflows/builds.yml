@@ -1,0 +1,71 @@
+# Coldshift Dash for Windows and Linux. The Mac build needs a signing key, so it is made where that key is
+# (tools/release.sh); the others are built here when a release is published and attached to it. They can also be started by hand for a release that exists
+# (Actions > Windows and Linux builds > Run workflow, with the release's tag).
+#
+# Each build is started once without a screen (--self-test: every page of the window on a throwaway
+# vehicle), so one that cannot start fails here instead of reaching the release.
+name: Windows and Linux builds
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The release to attach the builds to (for example v0.3)
+        required: true
+permissions:
+  contents: write       # to attach the builds to the release
+env:
+  TAG: ${{ github.event.release.tag_name || inputs.tag }}
+  GH_TOKEN: ${{ github.token }}
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Tests
+        run: |
+          python -m pip install -q -r requirements.txt
+          python -m unittest discover -s tests -t .
+      - name: Build
+        run: powershell -ExecutionPolicy Bypass -File packaging\build-win.ps1
+      - name: Start it once
+        shell: pwsh
+        run: |
+          $env:QT_QPA_PLATFORM = "offscreen"
+          $env:DASHSYNC_CONFIG = "$env:RUNNER_TEMP\dash-config"
+          $p = Start-Process -FilePath "packaging\dist\Coldshift Dash\Coldshift Dash.exe" -ArgumentList "--self-test" -PassThru
+          $null = $p.Handle
+          $done = $p.WaitForExit(90000)
+          $log = "$env:DASHSYNC_CONFIG\log.txt"
+          if (Test-Path $log) { Get-Content $log }
+          if (-not $done) { Stop-Process -Id $p.Id -Force; throw "the app did not finish its self-test in 90 s" }
+          if ($p.ExitCode -ne 0) { throw "the app's self-test ended with code $($p.ExitCode)" }
+          if (-not (Select-String -Path $log -Pattern "self-test ok" -Quiet)) { throw "the self-test did not report" }
+      - name: Attach to the release
+        shell: bash
+        run: gh release upload "$TAG" packaging/dist/*.zip --clobber
+
+  linux:                # an AppImage for each processor, each built on a machine of that kind
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - name: Build (in Docker; it runs the self-test)
+        run: ARCH=${{ matrix.arch }} packaging/build-linux.sh
+      - name: Attach to the release
+        run: gh release upload "$TAG" packaging/dist/*.AppImage --clobber

@@ -1,0 +1,16 @@
+{
+ "version": 1,
+ "title": "COLDSHIFT.DASH",
+ "badges": [
+  "badge-1.png"
+ ],
+ "background": "background.jpg",
+ "wordmark": "wordmark.png",
+ "car": "car.png",
+ "splash": {
+  "background": "splash.jpg",
+  "logo": "logo.png",
+  "effect": "shine",
+  "position": "left"
+ }
+}

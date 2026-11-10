@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Coldshift Dash
+Comment=Prepares the phone in your car for Coldshift Dash
+Exec=AppRun
+Icon=coldshift-dash
+Categories=Utility;
+Terminal=false
