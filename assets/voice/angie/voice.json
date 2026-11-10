@@ -42,6 +42,13 @@
   "off_route": "off_route.mp3",
   "no_route": "no_route.mp3",
   "gps_lost": "gps_lost.mp3",
-  "gps_back": "gps_back.mp3"
+  "gps_back": "gps_back.mp3",
+  "rec_stopped_storage": "rec_stopped_storage.mp3",
+  "rec_stopped_error": "rec_stopped_error.mp3",
+  "rec_stopped_battery": "rec_stopped_battery.mp3",
+  "check_engine": "check_engine.mp3",
+  "engine_hot": "engine_hot.mp3",
+  "phone_hot": "phone_hot.mp3",
+  "fuel_stop": "fuel_stop.mp3"
  }
 }

@@ -29,7 +29,7 @@ FORMATS = (".mp3", ".wav", ".ogg", ".m4a")
 MAX_SECONDS = 8
 MAX_BYTES = 2 * 1024 * 1024
 
-# key -> what to say. The app (Prompter.java, MapsPage.java) asks for these keys.
+# key -> what to say. The app (Prompter.java, MapsPage.java, and Cues.java for the warnings) asks for these keys.
 LINES = {
     "turn_left": "Turn left.",
     "turn_right": "Turn right.",
@@ -69,6 +69,14 @@ LINES = {
     "no_route": "No route found.",
     "gps_lost": "GPS signal lost.",
     "gps_back": "GPS signal is back.",
+    # warnings, said after the app's warning chime (Cues.java, UI.java)
+    "rec_stopped_storage": "Recording stopped. The storage is full.",
+    "rec_stopped_error": "Recording stopped. There is a problem with the camera.",
+    "rec_stopped_battery": "Recording stopped. The battery is low.",
+    "check_engine": "The check engine light is on.",
+    "engine_hot": "The engine is running hot.",
+    "phone_hot": "The phone is getting too hot.",
+    "fuel_stop": "Did you fill up? You can log it in the log book.",
 }
 
 # how the lines are shown for recording: (title, advice, keys)
@@ -82,6 +90,9 @@ GROUPS = [
     ("Joining", "Between two turns: “Turn left. Then turn right.”", ["then"]),
     ("Long roads", "Said after a turn when the next is far away.", ["follow_5km", "follow_10km", "follow_20km", "follow_50km"]),
     ("Arrival and status", "Said on their own.", ["arrived", "off_route", "no_route", "gps_lost", "gps_back"]),
+    ("Warnings", "Said after the warning chime. Without them the chime sounds alone.",
+     ["rec_stopped_storage", "rec_stopped_error", "rec_stopped_battery", "check_engine", "engine_hot", "phone_hot",
+      "fuel_stop"]),
 ]
 
 # the sample the window and the app's Test button play

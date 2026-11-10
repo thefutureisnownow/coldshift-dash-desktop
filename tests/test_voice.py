@@ -111,6 +111,11 @@ class VoiceTest(unittest.TestCase):
         asked = set(re.findall(r'"((?:turn|keep|exit|in|gps|no|off)_[a-z0-9_]+|u_turn|straight|then|destination|arrived|'
                                r'roundabout)"', src))
         asked |= {"roundabout_%d" % i for i in range(1, 9)} | {"follow_%dkm" % k for k in (5, 10, 20, 50)}
+        # the warnings: Cues.warn(…, "line") and Cues.notice(…, "line") in the dashcam and the main view
+        for name in ("Dashcam.java", "UI.java"):
+            path = os.path.join(APP, name)
+            if os.path.exists(path):
+                asked |= set(re.findall(r'Cues\.(?:warn|notice)\([^,]+, "([a-z_]+)"\)', read(path)))
         self.assertEqual(sorted(asked - set(voice.LINES)), [])
         grouped = [k for _, _, keys in voice.GROUPS for k in keys]
         self.assertEqual(sorted(grouped), sorted(voice.LINES))             # every line is shown once for recording
