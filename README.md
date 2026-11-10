@@ -10,7 +10,7 @@ Download from [Releases](https://github.com/thefutureisnownow/coldshift-dash-des
 
 **Windows (64-bit):** the `.zip`. Unpack it and start `Coldshift Dash.exe`. It is not signed, so Windows SmartScreen warns the first time: More info, then Run anyway.
 
-**Linux:** the `.AppImage` for your processor (`x86_64` for most PCs, `aarch64` for ARM). Make it executable (`chmod +x`) and start it; it needs glibc 2.35 or newer (Ubuntu 22.04 and later). For a phone on a USB cable Linux wants a udev rule: `sudo apt install android-sdk-platform-tools-common` on Debian and Ubuntu, `sudo dnf install android-tools` on Fedora, then plug the phone in again.
+**Linux:** the `.AppImage` for your processor (`x86_64` for most PCs, `aarch64` for ARM). Make it executable (`chmod +x`) and start it; the x86_64 one needs glibc 2.35 or newer (Ubuntu 22.04 and later), the aarch64 one glibc 2.39 (Ubuntu 24.04 and later). For a phone on a USB cable Linux wants a udev rule: `sudo apt install android-sdk-platform-tools-common` on Debian and Ubuntu, `sudo dnf install android-tools` on Fedora, then plug the phone in again.
 
 ## Connecting the phone
 

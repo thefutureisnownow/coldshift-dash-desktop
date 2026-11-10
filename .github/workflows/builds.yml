@@ -13,18 +13,23 @@ on:
       tag:
         description: The release to attach the builds to (for example v0.3)
         required: true
+      ref:
+        description: What to build, when not the release's own tag (for example main, after a fix to the build)
+        required: false
 permissions:
   contents: write       # to attach the builds to the release
 env:
   TAG: ${{ github.event.release.tag_name || inputs.tag }}
+  REF: ${{ inputs.ref || github.event.release.tag_name || inputs.tag }}
   GH_TOKEN: ${{ github.token }}
 jobs:
   windows:
     runs-on: windows-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ env.TAG }}
+          ref: ${{ env.REF }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -61,10 +66,11 @@ jobs:
           - arch: aarch64
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ env.TAG }}
+          ref: ${{ env.REF }}
       - name: Build (in Docker; it runs the self-test)
         run: ARCH=${{ matrix.arch }} packaging/build-linux.sh
       - name: Attach to the release

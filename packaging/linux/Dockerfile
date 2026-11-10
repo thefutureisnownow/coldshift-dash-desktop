@@ -1,8 +1,12 @@
-# Where the Linux AppImage is built (packaging/build-linux.sh). Ubuntu 22.04 is the oldest Linux the Qt packages install
-# on; Python 3.12 comes from the deadsnakes archive. The X and Wayland libraries are here so that PyInstaller finds
+# Where the Linux AppImage is built (packaging/build-linux.sh), on the oldest Ubuntu the Qt packages install on: 22.04
+# for x86_64, 24.04 for aarch64 (whose PySide6 wheels need its newer C library). BASE chooses; Python 3.12 comes from
+# the deadsnakes archive on 22.04 and is the system's own on 24.04. The X and Wayland libraries are here so that PyInstaller finds
 # them and puts them in the AppImage.
-FROM ubuntu:22.04
+ARG BASE=ubuntu:22.04
+FROM ${BASE}
 ARG ARCH=x86_64
+# no questions while installing: tzdata otherwise asks for a region and waits for an answer for ever
+ARG DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl file binutils gpg-agent software-properties-common \
  && add-apt-repository -y ppa:deadsnakes/ppa \
