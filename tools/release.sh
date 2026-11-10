@@ -18,7 +18,8 @@ packaging/build-mac.sh                    # first: it empties packaging/dist
 for arch in ${LINUX_ARCHS:-}; do
   ARCH=$arch packaging/build-linux.sh
 done
-(cd packaging/dist && shasum -a 256 Coldshift-Dash-*.dmg Coldshift-Dash-*.AppImage 2>/dev/null > SHA256SUMS; cat SHA256SUMS)
+# (ls names the files there are: without AppImages their pattern would stop shasum, and with it this script)
+(cd packaging/dist && shasum -a 256 $(ls Coldshift-Dash-*.dmg Coldshift-Dash-*.AppImage 2>/dev/null) > SHA256SUMS && cat SHA256SUMS)
 if [ "${1:-}" = "--upload" ]; then
   git tag -a "v$VERSION" -m "Coldshift Dash desktop $VERSION"
   git push origin "v$VERSION"
