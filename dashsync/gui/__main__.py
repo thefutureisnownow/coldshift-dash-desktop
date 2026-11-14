@@ -195,6 +195,7 @@ class Window(QMainWindow):
         sync = bar.addMenu("&Sync")
         self.sync_act = add(sync, "Sync Now", lambda: self._overview("sync"), "Ctrl+R")
         self.check_act = add(sync, "Check Again", lambda: self._overview("check"), "Ctrl+Shift+R")
+        self.pull_act = add(sync, "Copy from Phone…", lambda: self._overview("pull"))
         sync.addSeparator()
         add(sync, "Phone and Connection…", self.show_phone)
         view = bar.addMenu("&View")
@@ -208,7 +209,7 @@ class Window(QMainWindow):
     def _overview(self, what):
         self.go("Overview")
         page = self.stack.widget(self.titles.index("Overview"))
-        (page.sync if what == "sync" else page.check)()
+        {"sync": page.sync, "check": page.check, "pull": page.copy_from_phone}[what]()
 
     def show_log(self):
         path = paths.log_file()
@@ -377,7 +378,8 @@ class Window(QMainWindow):
         self.show_progress()
         self.busy.setText("%s…" % (s.busy[0].upper() + s.busy[1:]) if s.busy else "")
         self.switch_btn.setEnabled(not s.busy)
-        for act in (getattr(self, "switch_act", None), getattr(self, "sync_act", None), getattr(self, "check_act", None)):
+        for act in (getattr(self, "switch_act", None), getattr(self, "sync_act", None), getattr(self, "check_act", None),
+                    getattr(self, "pull_act", None)):
             if act is not None:
                 act.setEnabled(not s.busy and (act is self.switch_act or s.has_target()))
         self.switch_btn.setToolTip("Wait for %s to finish" % s.busy if s.busy else "")

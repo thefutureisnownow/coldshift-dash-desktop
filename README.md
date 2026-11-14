@@ -16,6 +16,8 @@ Download from [Releases](https://github.com/thefutureisnownow/coldshift-dash-des
 
 The app reaches the phone over a USB cable with adb (Android's debugging bridge), or through its SD card in a card reader. The first time a phone is needed, the app offers to download adb from Google, and walks you through switching on USB debugging on the phone.
 
+**Copy from phone** (on the Overview and in the Sync menu) goes the other way from a sync: the phone's look, voice packs, map and music replace this computer's, and its places, log book and recordings come too. Use it on a new computer before the first sync, or whenever the phone has the copy to keep. What this computer had is moved into `.previous` folders in the vehicle's folder, not deleted, and nothing on the phone changes. (On the command line: `pull-all`.)
+
 ## Running from source
 
 Python 3.11 or later:

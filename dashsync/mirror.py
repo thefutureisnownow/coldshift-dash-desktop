@@ -1,15 +1,14 @@
 """Copy folders between the card and a workspace on the computer.
 
-The workspace mirrors the card, so a new computer can be filled from the phone (pull_all) and the
+The workspace mirrors the card's music, so a new computer can be filled from the phone (pull_all) and the
 phone's music from the workspace (push_music):
 
     <workspace>/coldshift.dash/Music/      the music, as on the card
-    <workspace>/coldshift.dash/maps/       map files (the card holds one; the workspace may hold several)
     <workspace>/coldshift.dash/library/    the music index and covers (can be rebuilt with `index`)
-    <workspace>/coldshift.dash/profile/    per-vehicle settings (reserved)
     <workspace>/recordings/clips|marks|trips
 
-The first four are laid out exactly as on the card, so the workspace can be copied onto a card as is.
+The first two are laid out exactly as on the card. The look, voice packs and map come from the phone
+with fromphone, which puts them where the vehicle keeps them.
 
 Rules that protect data on the computer:
   * a file that already exists with the same size counts as done and is not copied again, so
@@ -32,7 +31,7 @@ import unicodedata
 from . import layout, recordings
 from .library import build_index, card_names
 
-SECTIONS = ("maps", "library", "profile", "music", "recordings")
+SECTIONS = ("library", "music", "recordings")
 STATE = ".dashsync-workspace.json"
 
 
@@ -128,9 +127,7 @@ def pull_all(target, sources, workspace, only=None, music_path="", music_match="
     music_remote = layout.MUSIC_DIR
     if not target.exists(music_remote) and target.exists(layout.LEGACY_MUSIC_DIR):
         music_remote = layout.LEGACY_MUSIC_DIR          # music dropped on the card by hand
-    plan = (("maps", layout.MAPS_DIR, layout.MAPS_DIR, lambda s: s.endswith(".map")),
-            ("library", layout.LIBRARY_DIR, layout.LIBRARY_DIR, None),
-            ("profile", layout.PROFILE_DIR, layout.PROFILE_DIR, None),
+    plan = (("library", layout.LIBRARY_DIR, layout.LIBRARY_DIR, None),
             ("music", music_remote, layout.MUSIC_DIR, _music_filter(music_path, music_match)))
     for name, remote, local, accept in plan:
         if name not in only:
@@ -141,7 +138,7 @@ def pull_all(target, sources, workspace, only=None, music_path="", music_match="
             # songs the workspace has under names the card carries without emoji
             aliases = {card: mine for mine, card in card_names(list(_local_files(local_dir))).items() if card != mine}
         r = pull_section(target, remote, local_dir, accept, overwrite, dry_run,
-                         progress if name == "music" or name == "maps" else None, aliases)
+                         progress if name == "music" else None, aliases)
         res[name] = r
         if not r["present"]:
             log("%-10s nothing on the phone" % name)

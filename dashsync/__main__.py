@@ -22,7 +22,7 @@
   python -m dashsync profile sync --adb                          put it on the card
   python -m dashsync voice sync --adb                            put them on the card (choose one in the app's Settings)
   python -m dashsync recordings pull --adb --dest ~/Movies/dash  copy clips, marks and trips to the Mac
-  python -m dashsync pull-all --workspace ~/dash --adb --serial ID   copy everything on the phone to this computer
+  python -m dashsync pull-all --workspace ~/dash --adb --serial ID   make this computer's copy the phone's
   python -m dashsync music push --adb [--dry-run]                index the workspace's music and put it on the card
   python -m dashsync adb status                                  is adb installed, and where
   python -m dashsync adb setup --accept-licence                  download Google's standalone adb
@@ -37,7 +37,7 @@ import argparse
 import os
 import sys
 
-from . import adbtool, layout, library, maps, mirror, paths, places, profile, recordings, routing, search, vehicles, voice
+from . import adbtool, backup, fromphone, layout, library, maps, mirror, paths, places, profile, recordings, routing, search, vehicles, voice
 from .library import build_index
 from .transport import open_sources, open_target
 
@@ -501,24 +501,76 @@ def cmd_music(a, ap):
 
 
 def cmd_pull_all(a, ap):
+    """The phone wins: its look, voices, map and music replace this vehicle's (fromphone), and its places,
+    settings, log book, track and recordings are copied."""
     ws = _workspace(a)
     srcs = open_sources(a.card, a.adb, a.serial, a.adb_path)
-    only = [x.strip() for x in a.only.split(",")] if a.only else None
+    only = set(x.strip() for x in a.only.split(",")) if a.only else set(PULL_SECTIONS)
+    unknown = only - set(PULL_SECTIONS)
+    if unknown:
+        sys.exit("unknown section(s): " + ", ".join(sorted(unknown)) + "; choose from " + ", ".join(PULL_SECTIONS))
 
-    def progress(i, n, done, total, name):
+    def progress(done, total):
         if sys.stderr.isatty():
-            print("\r  %d/%d  %s of %s  %s" % (i, n, _mb(done), _mb(total), name[:50]), end="\x1b[K", file=sys.stderr, flush=True)
-        elif i % 25 == 0 or i == n:
-            print("  %d/%d  %s of %s" % (i, n, _mb(done), _mb(total)))
+            print("\r  %s of %s" % (_mb(done), _mb(total)), end="\x1b[K", file=sys.stderr, flush=True)
+
+    def moved(part, name):
+        return "; %d replaced and %d taken away, moved to %s" % (part["replaced"], part["removed"], name) \
+            if part["replaced"] or part["removed"] else ""
 
     print("workspace:", ws, "\nfrom:", srcs[0].label)
+    verb = "would copy" if a.dry_run else "copied"
     try:
-        mirror.pull_all(srcs[0], srcs, ws, only, a.music_path or "", a.music_match or "", a.overwrite, a.dry_run,
-                        progress=progress)
+        def step(name):
+            if sys.stderr.isatty():
+                print(file=sys.stderr)          # (ends the last progress line)
+
+        r = fromphone.pull(srcs[0], ws, only=only & set(fromphone.PARTS), dry_run=a.dry_run, step=step,
+                           progress=progress, music_path=a.music_path or "", music_match=a.music_match or "")
+        if sys.stderr.isatty():
+            print(file=sys.stderr)
+        if "look" in r:
+            lk = r["look"]
+            print("%-10s %s%s%s" % ("look", "" if lk["present"] else "the phone has none, so the built-in one; ",
+                                    "%s %d files" % (verb, lk["copy"]) if lk["copy"] else "nothing to copy",
+                                    moved(lk, "profile.previous")))
+        if "voices" in r:
+            vo = r["voices"]
+            print("%-10s %s: %s%s" % ("voices", ", ".join(vo["packs"]) or "no packs on the phone",
+                                      "%s %d files" % (verb, vo["copy"]) if vo["copy"] else "nothing to copy",
+                                      moved(vo, "voice.previous")))
+        if "map" in r:
+            mp = r["map"]
+            if not mp["name"]:
+                print("%-10s nothing on the phone" % "map")
+            else:
+                if a.dry_run:
+                    region = "its region becomes this vehicle's"
+                elif mp["found"]:
+                    region = "region %s%s" % (mp["region"], " (was %s)" % mp["was"] if mp["was"] and mp["was"] != mp["region"] else "")
+                else:
+                    region = "region not set: the server %s; choose it with  maps choose" % (
+                        "could not be asked" if mp["found"] is None else "has no single map by that name")
+                print("%-10s %s %s; %s" % ("map", mp["name"], "%s to the map cache" % verb if mp["copied"]
+                                           else "already in the map cache", region))
+        if "music" in r:
+            mu = r["music"]
+            print("%-10s %s%s" % ("music", "%s %d songs (%s)" % (verb, mu["songs"], _mb(mu["bytes"])) if mu["songs"]
+                                  else "nothing to copy" if mu["present"] else "nothing on the phone",
+                                  moved(mu, "Music.previous")))
+        if "phone" in only and a.dry_run:
+            print("%-10s %s" % ("phone", "would copy the places, settings, log book and track"))
+        elif "phone" in only:
+            b = backup.backup(srcs[0], ws)
+            print("%-10s %s" % ("phone", "copied: " + ", ".join(b["changed"]) if b["changed"] else
+                                "places, settings, log book and track already here"))
+        if "recordings" in only:
+            mirror.pull_all(srcs[0], srcs, ws, ["recordings"], dry_run=a.dry_run)
     except (RuntimeError, ValueError) as e:
         sys.exit(str(e))
-    if sys.stderr.isatty():
-        print(file=sys.stderr)
+
+
+PULL_SECTIONS = ("look", "voices", "map", "phone", "music", "recordings")   # phone: places, settings, log book, track
 
 
 def main(argv=None):
@@ -609,13 +661,12 @@ def main(argv=None):
     rp.add_argument("--force", action="store_true", help="copy again even if already pulled")
     rp.add_argument("--dry-run", action="store_true")
 
-    pa = sub.add_parser("pull-all", help="copy everything on the phone (maps, music, recordings...) into a workspace")
+    pa = sub.add_parser("pull-all", help="replace the vehicle's look, voices, map and music with the phone's, and copy its places, log book and recordings")
     _where(pa)
     pa.add_argument("--workspace", help="a vehicle folder to use for this run (default: the open vehicle)")
-    pa.add_argument("--only", help="comma list of: " + ", ".join(mirror.SECTIONS))
-    pa.add_argument("--music-path", help="only music under this folder, e.g. 'Pet Shop Boys'")
-    pa.add_argument("--music-match", help="only music whose path contains this text")
-    pa.add_argument("--overwrite", action="store_true", help="replace local files that differ from the card's")
+    pa.add_argument("--only", help="comma list of: " + ", ".join(PULL_SECTIONS))
+    pa.add_argument("--music-path", help="only music under this folder, e.g. 'Pet Shop Boys' (then no songs are taken away)")
+    pa.add_argument("--music-match", help="only music whose path contains this text (then no songs are taken away)")
     pa.add_argument("--dry-run", action="store_true", help="show what would be copied")
 
     mu = sub.add_parser("music", help="music: put the workspace's music on the card")

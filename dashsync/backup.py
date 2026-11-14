@@ -8,7 +8,8 @@ app-settings.json, the copy each replaces kept as *.previous.json; log/ and trac
 
 `restore` puts everything on a phone, e.g. a new one: places and settings (the app takes them in), the
 log book and track segments, the look, the voices, the map with its routing tiles and place search, and
-the music.
+the music. fromphone.pull goes the other way for the look, voices, map and music: the phone's replace
+this computer's.
 """
 import os
 
@@ -132,3 +133,4 @@ def restore(target, vehicle, step=None, progress=None, copying=None):
         out["music"] = "none in this vehicle"
     out["app"] = target.notify_synced(["places", "settings", "log", "track", "profile", "voice", "maps", "search", "music"])
     return out
+

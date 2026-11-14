@@ -35,12 +35,13 @@ class MirrorTest(unittest.TestCase):
         return mirror.pull_all(self.t, [self.t], self.ws, log=lambda m: None, **kw)
 
     def test_pulls_everything_and_skips_dotfiles_and_partials(self):
-        r = self.pull(only=["music", "maps", "library"])
+        r = self.pull(only=["music", "library"])
         self.assertEqual(r["music"]["pulled"], 3)
         self.assertTrue(os.path.exists(self.ws + "/coldshift.dash/Music/Nightwish/3 - song 🎶.mp3"))
         self.assertFalse(os.path.exists(self.ws + "/coldshift.dash/Music/Nightwish/.hidden"))
         self.assertFalse(os.path.exists(self.ws + "/coldshift.dash/Music/Nightwish/half.mp3.part"))
-        self.assertEqual(r["maps"]["pulled"], 1)
+        self.assertEqual(r["library"]["pulled"], 1)
+        self.assertFalse(os.path.exists(self.ws + "/coldshift.dash/maps"))     # maps go to the cache (fromphone)
 
     def test_second_pull_copies_nothing(self):
         self.pull(only=["music"])
@@ -85,14 +86,14 @@ class MirrorTest(unittest.TestCase):
         self.assertTrue(os.path.exists(self.ws + "/coldshift.dash/Music/Nightwish/3 - song 🎶.mp3"))
 
     def test_workspace_layout_matches_the_card(self):
-        self.pull(only=["music", "maps", "library"])
-        for rel in ("coldshift.dash/Music/Pet Shop Boys/one.mp3", "coldshift.dash/maps/a.map",
-                    "coldshift.dash/library/index.json"):
+        self.pull(only=["music", "library"])
+        for rel in ("coldshift.dash/Music/Pet Shop Boys/one.mp3", "coldshift.dash/library/index.json"):
             self.assertTrue(os.path.exists(os.path.join(self.ws, *rel.split("/"))), rel)
 
     def test_missing_folders_are_reported_not_fatal(self):
-        r = self.pull(only=["profile"])
-        self.assertFalse(r["profile"]["present"])
+        shutil.rmtree(self.card + "/coldshift.dash/library")
+        r = self.pull(only=["library"])
+        self.assertFalse(r["library"]["present"])
 
     def test_unknown_section(self):
         with self.assertRaises(ValueError):

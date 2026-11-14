@@ -3,7 +3,10 @@
 A card per part (map, music, voices, look, recordings, and what the phone records). The page compares
 each with the phone when it is shown, one after the other in a single job, and tells the window, which
 puts the same light beside the part's page in the sidebar. Sync copies what the phone recorded to this
-computer, then puts the whole vehicle on the phone; only what is missing or different is copied."""
+computer, then puts the whole vehicle on the phone; only what is missing or different is copied.
+
+Copy from phone goes the other way: the phone's look, voices, map and music replace this computer's
+(fromphone), then what the phone recorded comes too. Nothing is put on the phone."""
 import os
 import time
 
@@ -11,7 +14,7 @@ from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (QFrame, QGridLayout, QHBoxLayout, QLabel, QMessageBox, QPushButton,
                                QVBoxLayout, QWidget)
 
-from .. import backup, layout, logbook, maps, mirror, paths, places, profile, recordings, track, voice
+from .. import backup, fromphone, layout, logbook, maps, mirror, paths, places, profile, recordings, track, voice
 from . import forms, theme, worker
 from .state import Progress
 from .maps_page import region_name
@@ -35,8 +38,12 @@ def _size(n):
 STEP_NAMES = {"from the phone": "Places, settings, log book and track from the phone",
               "recordings": "Recordings to this computer", "places and settings": "Places and settings to the phone",
               "log book and track": "Log book and track to the phone", "look": "Look", "voices": "Voices",
-              "map": "Map", "routing": "Routing for navigation", "place search": "Place search", "music": "Music"}
+              "map": "Map", "routing": "Routing for navigation", "place search": "Place search", "music": "Music",
+              "look from the phone": "Look from the phone", "voices from the phone": "Voice packs from the phone",
+              "map from the phone": "Map from the phone", "music from the phone": "Music from the phone"}
 STEP_STARTS = {"from the phone": "Reading the phone…", "recordings": "Looking for new recordings…",
+               "map from the phone": "Copying the map to this computer…",
+               "music from the phone": "Comparing the phone's music with this computer's…",
                "map": "Checking the server for a newer map…", "routing": "Checking the routing tiles…",
                "place search": "Checking the place search…", "music": "Comparing the music with the phone…"}
 DOWNLOADS = ("map", "routing", "place search")       # steps whose progress is a download, in bytes
@@ -61,6 +68,11 @@ def _doing(step, done, total, moved, seconds):
 
 def _count(n, one, many=None):
     return "%d %s" % (n, one if n == 1 else many or one + "s")
+
+
+def _and(items):
+    """["a", "b", "c"] -> "a, b and c"."""
+    return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1]
 
 
 def songs(vehicle):
@@ -223,6 +235,10 @@ class OverviewPage(QWidget):
         self.sync_btn.setDefault(True)
         self.sync_btn.setToolTip("Copy what the phone recorded to this computer, then put everything the phone lacks on it")
         self.sync_btn.clicked.connect(self.sync)
+        self.pull_btn = QPushButton("Copy from phone")
+        self.pull_btn.setToolTip("Replace this computer's look, voice packs, map and music with the phone's, and copy "
+                                 "its places, log book and recordings. Nothing on the phone changes.")
+        self.pull_btn.clicked.connect(self.copy_from_phone)
         self.check_btn = QPushButton("Check again")
         self.check_btn.clicked.connect(self.check)
         self.bar = Progress(state)
@@ -234,6 +250,7 @@ class OverviewPage(QWidget):
         top = QHBoxLayout()
         top.addLayout(words, 1)
         top.addWidget(self.check_btn, 0, Qt.AlignTop)
+        top.addWidget(self.pull_btn, 0, Qt.AlignTop)
         top.addWidget(self.sync_btn, 0, Qt.AlignTop)
         hero = QFrame()
         hero.setObjectName("hero")
@@ -336,6 +353,7 @@ class OverviewPage(QWidget):
         ok = bool(self.vehicle()) and self.state.has_target() and not self.state.busy
         self.sync_btn.setEnabled(ok)
         self.check_btn.setEnabled(ok)
+        self.pull_btn.setEnabled(ok)
         tip = "Wait for %s to finish" % self.state.busy if self.state.busy else ""
         self.check_btn.setToolTip(tip)
 
@@ -450,35 +468,60 @@ class OverviewPage(QWidget):
                                     ", after the download" if any(m.get("download") for m in moves) else ""))
 
     def sync(self):
-        v = self.vehicle()
         if self.state.busy:
             return
         ask = self._question()
         if ask and QMessageBox.question(self, "Sync", ask) != QMessageBox.Yes:
             return
+        self._run(pull_first=False, push=True)
+
+    def copy_from_phone(self):
+        if self.state.busy:
+            return
+        label = self.state.label()
+        text = ("Replace this computer's copy of the vehicle with what %s holds: its look, voice packs, map and music "
+                "take the place of this computer's, and its places, settings, log book%s come too.\n\n"
+                "Files this computer has that the phone does not are moved into folders ending .previous in the "
+                "vehicle's folder, not deleted. Nothing on the phone changes.\n\nCopy from the phone now?"
+                % (label, ", track and recordings" if recordings_dest() else " and track"))
+        if QMessageBox.question(self, "Copy from phone", text) != QMessageBox.Yes:
+            return
+        self._run(pull_first=True, push=False)
+
+    def _run(self, pull_first, push):
+        """The sync's job: with pull_first the phone's look, voices, map and music come here first
+        (fromphone.pull); then what the phone recorded; then, with push, the whole vehicle goes on the phone."""
+        v = self.vehicle()
         try:
             target, sources = self.state.target(), self.state.sources()
         except SystemExit as e:
             forms.error(self, "Sync", str(e.code))
             return
-        if not self._begin("syncing everything", "Syncing with %s…" % self.state.label()):
+        what, text = (("syncing everything", "Syncing with %s…") if push else
+                      ("copying from the phone", "Copying from %s…"))
+        if not self._begin(what, text % self.state.label()):
             return
         dest = recordings_dest()
-        steps = ["from the phone"] + (["recordings"] if dest else []) + list(backup.STEPS)
+        steps = ((list(fromphone.STEPS) if pull_first else []) + ["from the phone"] + (["recordings"] if dest else [])
+                 + (list(backup.STEPS) if push else []))
         self.step = steps[0]
         self.state.set_steps([STEP_NAMES.get(s, s) for s in steps])
         began = [time.time(), None]         # when the running step's progress began, and at how much
 
         def work(report):
             out = {}
+            if pull_first:
+                out["pulled"] = fromphone.pull(target, v, step=lambda name: report("step", name),
+                                               progress=lambda d, t: report(d, t))
             report("step", "from the phone")
             out["from"] = backup.backup(target, v)
             if dest:
                 report("step", "recordings")
                 out["recordings"] = recordings.pull(sources, dest, log=lambda m: None,
                                                     progress=lambda i, n, d, t, key: report(d, t))
-            out["to"] = backup.restore(target, v, step=lambda name: report("step", name),
-                                       progress=lambda d, t: report(d, t), copying=lambda: report("copying", None))
+            if push:
+                out["to"] = backup.restore(target, v, step=lambda name: report("step", name),
+                                           progress=lambda d, t: report(d, t), copying=lambda: report("copying", None))
             return out
 
         def progress(a, b):
@@ -499,26 +542,38 @@ class OverviewPage(QWidget):
         def done(r):
             self._end()
             said = []
+            pulled = fromphone.says(r["pulled"]) if r.get("pulled") else []
+            if pulled:
+                said.append("Copied from the phone: %s." % _and(pulled))
+            mp = (r.get("pulled") or {}).get("map") or {}
+            if mp.get("name") and mp.get("found") is not True:
+                said.append("Choose the region for %s on the Maps page%s." % (
+                    mp["name"], " (the server could not be asked)" if mp.get("found") is None else ""))
+            moved = fromphone.moved(r["pulled"]) if r.get("pulled") else []
+            if moved:
+                said.append("What this computer had instead is in %s in the vehicle's folder." % _and(moved))
             if r["from"]["changed"]:
-                said.append("Copied from the phone: %s." % ", ".join(r["from"]["changed"]))
+                said.append(("Also copied: %s." if pulled else "Copied from the phone: %s.") % ", ".join(r["from"]["changed"]))
             rec = r.get("recordings")
             if rec and rec["pulled"]:
                 said.append("%s copied (%s)." % (_count(rec["pulled"], "recording file"), _size(rec["bytes"])))
             if rec and rec["skipped_busy"]:
                 said.append("%s still being recorded, left for next time." % _count(rec["skipped_busy"], "file"))
-            if r["to"].get("app"):
+            if r.get("to", {}).get("app"):
                 said.append("The app %s." % r["to"]["app"].replace(",", ", "))
             self.show_local()
             self.show_phone_copy()
-            self.check(after=("Synced. " + " ".join(said)).strip())
+            self._buttons()
+            self.check(after=(("Synced. " if push else "") + " ".join(said)).strip() or "Nothing new on the phone.")
 
         def failed(msg):
             self._end()
             self._unknown()
-            said = ("Cancelled at: %s." if msg == worker.CANCELLED else "The sync stopped at: %s.") % self.step
+            said = ("Cancelled at: %s." if msg == worker.CANCELLED else
+                    ("The sync stopped at: %s." if push else "The copy stopped at: %s.")) % self.step
             said += " What was copied before that stays."
-            self.headline.setText("Sync cancelled" if msg == worker.CANCELLED else "The sync stopped")
+            self.headline.setText("Cancelled" if msg == worker.CANCELLED else "The sync stopped" if push else "The copy stopped")
             self.note.setText(said)
-            forms.error(self, "Sync", msg)
+            forms.error(self, "Sync" if push else "Copy from phone", msg)
             self.check(after=said)          # the cards as they are now
         worker.run(work, done, failed, progress=progress)
