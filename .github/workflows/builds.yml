@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: The release to attach the builds to (for example v0.3)
+        description: The release to attach the builds to (for example v0.4)
         required: true
       ref:
         description: What to build, when not the release's own tag (for example main, after a fix to the build)
