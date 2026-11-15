@@ -111,9 +111,10 @@ def _settled(target, base, first, wait):
 
 
 def pull(targets, dest, delete_synced=False, force=False, settle_seconds=None, log=print, dry_run=False,
-         progress=None):
+         progress=None, only=None):
     """Returns {"pulled", "skipped_done", "skipped_busy", "deleted", "bytes", "missing_sources"}.
-    `progress(i, n, done_bytes, total_bytes, key)` is called after each file copied."""
+    `progress(i, n, done_bytes, total_bytes, key)` is called after each file copied. With `only` (keys), just
+    those files are looked at."""
     os.makedirs(dest, exist_ok=True)
     state = _load(dest)
     files = state.setdefault("files", {})
@@ -124,6 +125,8 @@ def pull(targets, dest, delete_synced=False, force=False, settle_seconds=None, l
             result["missing_sources"] += 1
             continue
         found = _scan(target, base)
+        if only is not None:
+            found = {k: v for k, v in found.items() if k in only}
         wait = settle_seconds if settle_seconds is not None else (2.5 if target.kind == "adb" else 0)
         stable = _settled(target, base, found, wait)
         log("%s: %d files on the card" % (target.label, len(found)))
@@ -181,11 +184,29 @@ def _delete_if_pulled(target, remote, key, size, files, dest):
     return "deleted"
 
 
-def status(targets, dest, settle_seconds=None):
+def local_files(dest):
+    """{key: size} for the recordings copied into `dest` (what is there now, whatever the card holds)."""
+    out = {}
+    for group, _, exts in GROUPS:
+        folder = os.path.join(dest, group)
+        try:
+            names = os.listdir(folder)
+        except OSError:
+            continue
+        for name in names:
+            p = os.path.join(folder, name)
+            if not name.startswith(".") and name.lower().endswith(exts) and os.path.isfile(p):
+                out[group + "/" + name] = os.path.getsize(p)
+    return out
+
+
+def status(targets, dest, settle_seconds=None, here_too=False):
     """Everything syncable on the card(s) and whether it is on this computer yet:
-    {"items": [describe(key) + {"key", "size", "pulled", "pulled_before", "busy", "source"}],
-     "missing_sources": n}.
-    "busy" means it is still being written (its size changed while we looked)."""
+    {"items": [describe(key) + {"key", "size", "pulled", "pulled_before", "busy", "source", "remote",
+     "on_card"}], "missing_sources": n}.
+    "busy" means it is still being written (its size changed while we looked); "remote" is its path on the
+    card ("source" names which). With `here_too`, copies here that no card holds any more are items too
+    (on_card False, source and remote None, pulled True)."""
     files = _load(dest).get("files", {}) if os.path.isdir(dest) else {}
     items, missing = [], 0
     for target in targets:
@@ -202,8 +223,50 @@ def status(targets, dest, settle_seconds=None):
             pulled = before and os.path.exists(local) and os.path.getsize(local) == size
             # copied once and since removed here: pull does not fetch it again (force=True does)
             items.append(dict(describe(key), key=key, size=size, pulled=pulled, pulled_before=before and not pulled,
-                              busy=key not in stable, source=target.label))
+                              busy=key not in stable, source=target.label, remote=remote, on_card=True))
+    if here_too and os.path.isdir(dest):
+        seen = {i["key"] for i in items}
+        for key, size in sorted(local_files(dest).items()):
+            if key not in seen:
+                items.append(dict(describe(key), key=key, size=size, pulled=True, pulled_before=False, busy=False,
+                                  source=None, remote=None, on_card=False))
     return {"items": items, "missing_sources": missing}
+
+
+def delete_here(dest, keys, remove=os.remove):
+    """Removes this computer's copies of `keys` (`remove(path)` does it: the app moves them to the Trash). What
+    was copied stays noted, so a later pull does not fetch them again. Returns {"deleted", "freed"}."""
+    out = {"deleted": 0, "freed": 0}
+    for key in keys:
+        p = os.path.join(dest, *key.split("/"))
+        if os.path.isfile(p):
+            size = os.path.getsize(p)
+            remove(p)
+            out["deleted"] += 1
+            out["freed"] += size
+    return out
+
+
+def delete_from_card(targets, items):
+    """Removes `items` (status items: their "source" names the target, "remote" the file) from the card,
+    whether or not they were copied. A file still being written (its size changed since it was listed) is
+    kept. Returns {"deleted", "freed", "kept_changed"}."""
+    by_label = {t.label: t for t in targets}
+    out = {"deleted": 0, "freed": 0, "kept_changed": 0}
+    for i in items:
+        t = by_label.get(i.get("source"))
+        if not t or not i.get("remote"):
+            continue
+        size = _remote_size(t, i["remote"])
+        if size is None:
+            continue                    # gone already
+        if size != i["size"]:
+            out["kept_changed"] += 1
+            continue
+        t.remove(i["remote"])
+        out["deleted"] += 1
+        out["freed"] += size
+    return out
 
 
 def delete_pulled(targets, dest, keep_locked=True, log=print):

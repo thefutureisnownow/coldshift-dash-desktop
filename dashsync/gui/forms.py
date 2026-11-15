@@ -1,15 +1,19 @@
 """Small things the pages share: forms that use the page's width, muted notes that work in dark mode,
 one way to show errors, and the platform's words for showing a folder."""
 import os
+import shutil
+import subprocess
 import sys
 
-from PySide6.QtCore import Qt, QUrl
+from PySide6.QtCore import QFile, Qt, QUrl
 from PySide6.QtGui import QDesktopServices, QPalette
 from PySide6.QtWidgets import QFormLayout, QHBoxLayout, QLabel, QMessageBox, QVBoxLayout, QWidget
 
 from .worker import CANCELLED
 
 SHOW_FOLDER = "Show in Finder" if sys.platform == "darwin" else "Show in Explorer" if os.name == "nt" else "Open folder"
+SHOW_FILE = "Show in Finder" if sys.platform == "darwin" else "Show in Explorer" if os.name == "nt" else "Show in folder"
+TRASH = "the Recycle Bin" if os.name == "nt" else "the Trash"
 # a red readable on light and dark backgrounds (about 4.5:1 on both)
 WARN = "#d9534f"
 
@@ -71,6 +75,34 @@ def empty(title, text, *buttons):
 def show_folder(path):
     os.makedirs(path, exist_ok=True)
     QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
+
+def reveal(path):
+    """Shows a file picked out in its folder: Finder, Explorer, or on Linux the file manager that answers
+    freedesktop's ShowItems (else just the folder)."""
+    try:
+        if sys.platform == "darwin":
+            subprocess.Popen(["open", "-R", path])
+            return
+        if os.name == "nt":
+            subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
+            return
+        if shutil.which("dbus-send"):
+            r = subprocess.run(["dbus-send", "--session", "--print-reply", "--dest=org.freedesktop.FileManager1",
+                                "/org/freedesktop/FileManager1", "org.freedesktop.FileManager1.ShowItems",
+                                "array:string:" + QUrl.fromLocalFile(path).toString(), "string:"],
+                               capture_output=True, timeout=5)
+            if r.returncode == 0:
+                return
+    except (OSError, subprocess.SubprocessError):
+        pass
+    show_folder(os.path.dirname(path))
+
+
+def to_trash(path):
+    """Moves a file to the Trash (Recycle Bin), so a mistake can be undone there."""
+    if not QFile.moveToTrash(path):
+        raise OSError("couldn't move %s to %s" % (os.path.basename(path), TRASH))
 
 
 def error(parent, action, msg):

@@ -1,9 +1,18 @@
-"""Recordings page: what the dashcam left on the card, pull it, then free up the card on request."""
-import os
+"""Recordings page: what the dashcam left on the card and what is copied here, pull it, then free up the card
+on request.
 
-from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QFileDialog, QGroupBox, QHBoxLayout, QHeaderView, QLabel,
-                               QMessageBox, QPushButton, QStackedWidget, QTableWidget, QTableWidgetItem, QVBoxLayout,
-                               QWidget)
+The list holds both: what the phone has and the copies on this computer (also those whose originals are gone
+from the phone, and all of them when the phone is not connected). A row is shown in Finder (Explorer) with a
+double-click; Mix and export takes the selected rows' videos; Delete takes the selected rows off this computer
+(to the Trash), the phone, or both. Selected rows stay selected when the list is looked at again.
+"""
+import os
+import sys
+
+from PySide6.QtCore import QItemSelection, QItemSelectionModel, Qt
+from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QDialog, QDialogButtonBox, QFileDialog, QGroupBox,
+                               QHBoxLayout, QHeaderView, QLabel, QMenu, QMessageBox, QPushButton, QStackedWidget,
+                               QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
 from .. import paths, recordings
 from . import forms, worker
@@ -11,11 +20,19 @@ from .state import Progress
 from .mix_dialog import MixDialog
 
 KINDS = {"clip": "Clip", "mark": "Mark", "trip": "Trip log", "interior": "Interior shot", "sound": "Sound"}
+# which of a row's files Show in Finder picks out, first found
+SHOW_FIRST = (".mp4", ".wav", ".jpg", ".gpx", ".json", ".csv", ".srt", ".gcsv")
+VIDEO_KINDS = ("clip", "mark")
+COLUMNS = ["Recorded", "What", "Files", "Size", "On the phone", "On this computer"]
 
 
 def _mb(n):
     return ("%.1f GB" % (n / 1e9) if n >= 1e9 else "%.0f MB" % (n / 1e6) if n >= 1e6
             else "%.0f KB" % (n / 1e3) if n >= 1e3 else "under 1 KB")
+
+
+def _n(n, one, many=None):
+    return "%d %s" % (n, one if n == 1 else many or one + "s")
 
 
 def recordings_dest():
@@ -27,18 +44,114 @@ def recordings_dest():
 
 
 def group_items(items):
-    """One row per recording: a clip's .mp4 and .srt (or a mark's files) together, newest first."""
+    """One row per recording: a clip's .mp4 and .srt (or a mark's files) together, newest first. A row keeps
+    its files ("items"), and says whether they are on the card ("on_card") and here ("pulled": all of them)."""
     rows = {}
     for i in items:
-        key = (i["source"], i["group"], i["base"])
-        r = rows.setdefault(key, {"when": i["when"], "kind": i["kind"], "locked": i["locked"], "base": i["base"], "files": [],
-                                  "size": 0, "pulled": True, "pulled_before": False, "busy": False})
+        key = (i["group"], i["base"])
+        r = rows.setdefault(key, {"id": key, "when": i["when"], "kind": i["kind"], "locked": i["locked"],
+                                  "base": i["base"], "files": [], "items": [], "size": 0, "pulled": True,
+                                  "pulled_before": False, "busy": False, "on_card": False})
         r["files"].append(i["name"].rsplit(".", 1)[-1])
+        r["items"].append(i)
         r["size"] += i["size"]
         r["pulled"] = r["pulled"] and i["pulled"]
         r["pulled_before"] = r["pulled_before"] or i["pulled_before"]
         r["busy"] = r["busy"] or i["busy"]
+        r["on_card"] = r["on_card"] or i.get("on_card", True)
     return sorted(rows.values(), key=lambda r: (r["when"] is not None, r["when"]), reverse=True)
+
+
+def local_path(dest, item):
+    return os.path.join(dest, *item["key"].split("/"))
+
+
+def shown_file(dest, row):
+    """The row's file to pick out in Finder (its video, sound or photo before the rest), or None when none of
+    its files is here."""
+    here = [local_path(dest, i) for i in row["items"] if os.path.isfile(local_path(dest, i))]
+    for ext in SHOW_FIRST:
+        for p in here:
+            if p.lower().endswith(ext):
+                return p
+    return here[0] if here else None
+
+
+def videos(dest, rows):
+    """The selected rows' videos (dashcam clips and marks' .mp4): (paths here, items only on the phone)."""
+    here, missing = [], []
+    for r in rows:
+        if r["kind"] not in VIDEO_KINDS:
+            continue
+        for i in r["items"]:
+            if not i["name"].lower().endswith(".mp4"):
+                continue
+            if os.path.isfile(local_path(dest, i)):
+                here.append(local_path(dest, i))
+            elif i.get("on_card", True) and not i["busy"]:
+                missing.append(i)
+    return here, missing
+
+
+class DeleteDialog(QDialog):
+    """Asks where to delete the selected recordings from: this computer (to the Trash), the phone, or both."""
+    def __init__(self, parent, rows, dest, phone_ok):
+        super().__init__(parent)
+        self.setWindowTitle("Delete recordings")
+        self.here = [i for r in rows for i in r["items"] if os.path.isfile(local_path(dest, i))]
+        self.card = [i for r in rows for i in r["items"] if i.get("on_card", True)]
+        self.locked = any(r["locked"] for r in rows)
+        what = ("the %s of %s" % (KINDS.get(rows[0]["kind"], "recording").lower(),
+                                  rows[0]["when"].strftime("%a %d %b %Y %H:%M:%S")) if len(rows) == 1 and rows[0]["when"]
+                else _n(len(rows), "recording"))
+        head = QLabel("Delete %s from:" % what)
+        head.setWordWrap(True)
+        here_bytes = sum(os.path.getsize(local_path(dest, i)) for i in self.here)
+        self.cb_here = QCheckBox("This computer: %s, %s (moved to %s)" % (_n(len(self.here), "file"), _mb(here_bytes),
+                                                                         forms.TRASH)
+                                 if self.here else "This computer (it has no copy)")
+        self.cb_here.setEnabled(bool(self.here))
+        self.cb_here.setChecked(bool(self.here))
+        card_text = ("The phone: %s, %s (gone for good)" % (_n(len(self.card), "file"), _mb(sum(i["size"] for i in self.card)))
+                     if self.card else "The phone (it doesn't have them any more)")
+        if self.card and not phone_ok:
+            card_text = "The phone: connect it first (or wait for the job that has it)"
+        self.cb_card = QCheckBox(card_text)
+        self.cb_card.setEnabled(bool(self.card) and phone_ok)
+        self.warn = QLabel()
+        self.warn.setWordWrap(True)
+        self.warn.setStyleSheet("color: %s" % forms.WARN)
+        self.buttons = QDialogButtonBox(QDialogButtonBox.Cancel)
+        self.delete_btn = self.buttons.addButton("Delete", QDialogButtonBox.DestructiveRole)
+        self.delete_btn.clicked.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        lay = QVBoxLayout(self)
+        lay.addWidget(head)
+        lay.addWidget(self.cb_here)
+        lay.addWidget(self.cb_card)
+        lay.addWidget(self.warn)
+        lay.addWidget(self.buttons)
+        for cb in (self.cb_here, self.cb_card):
+            cb.toggled.connect(self._changed)
+        self._changed()
+
+    def _changed(self, *_):
+        here, card = self.cb_here.isChecked(), self.cb_card.isChecked()
+        self.delete_btn.setEnabled(here or card)
+        words = []
+        if card:
+            only_there = [i for i in self.card if not i["pulled"]]
+            if here:
+                words.append("They'll be on neither: what was on the phone is gone for good, and this computer's "
+                             "copies can only be brought back from %s." % forms.TRASH)
+            elif only_there:
+                words.append("%s on the phone %s no copy here: deleting from the phone loses %s."
+                             % (_n(len(only_there), "file"), "has" if len(only_there) == 1 else "have",
+                                "it" if len(only_there) == 1 else "them"))
+            if self.locked:
+                words.append("Locked clips are among them.")
+        self.warn.setText(" ".join(words))
+        self.warn.setVisible(bool(words))
 
 
 class RecordingsPage(QWidget):
@@ -46,6 +159,11 @@ class RecordingsPage(QWidget):
         super().__init__()
         self.state = state
         self.loaded_once = False
+        self.listed_phone = False         # the last list included the phone's files
+        self.after = ""
+        self.loud = False                 # the user asked for this look: a phone that can't be reached is an error
+        self.then_mix = None              # keys to mix once copied
+        self.mine = False                 # this page's job holds the phone
 
         where = QGroupBox("Copies go to")
         self.dest_label = QLabel()
@@ -61,25 +179,32 @@ class RecordingsPage(QWidget):
 
         self.summary = QLabel()
         self.summary.setWordWrap(True)
-        self.table = QTableWidget(0, 5)
-        self.table.setHorizontalHeaderLabels(["Recorded", "What", "Files", "Size", "On this computer"])
+        self.table = QTableWidget(0, len(COLUMNS))
+        self.table.setHorizontalHeaderLabels(COLUMNS)
         hh = self.table.horizontalHeader()
-        for c in range(5):
+        for c in range(len(COLUMNS)):
             hh.setSectionResizeMode(c, QHeaderView.Stretch if c == 0 else QHeaderView.ResizeToContents)
         self.table.verticalHeader().hide()
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.table.doubleClicked.connect(lambda *_: self.open_dest())
-        self.table.setToolTip("Double-click to show the copies")
+        self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.table.doubleClicked.connect(lambda index: self.reveal(index.row()))
+        self.table.setToolTip("Double-click: %s. Right-click for more." % forms.SHOW_FILE)
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._menu)
+        self.table.itemSelectionChanged.connect(self._buttons)
 
         self.refresh_btn = QPushButton("Check card")
-        self.refresh_btn.clicked.connect(self.refresh)
+        self.refresh_btn.clicked.connect(lambda: self.refresh(loud=True))
         self.pull_btn = QPushButton("Sync to PC")
         self.pull_btn.setDefault(True)
-        self.pull_btn.clicked.connect(self.pull)
+        self.pull_btn.clicked.connect(lambda: self.pull())
         self.free_btn = QPushButton("Free up the card…")
         self.free_btn.setToolTip("Deletes from the card only what is safely copied here")
         self.free_btn.clicked.connect(self.free)
+        self.delete_btn = QPushButton("Delete…")
+        self.delete_btn.setToolTip("Deletes the selected recordings from this computer, the phone, or both")
+        self.delete_btn.clicked.connect(self.delete)
         self.mix_btn = QPushButton("Mix and export…")
         self.mix_btn.setToolTip("Makes a video from the selected clips with the engine and exhaust mixed into one sound")
         self.mix_btn.clicked.connect(self.mix)
@@ -87,6 +212,7 @@ class RecordingsPage(QWidget):
         for w in (self.pull_btn, self.refresh_btn, self.free_btn):
             buttons.addWidget(w)
         buttons.addStretch()
+        buttons.addWidget(self.delete_btn)
         buttons.addWidget(self.mix_btn)
         self.rows = []
         self.bar = Progress(state)
@@ -96,7 +222,7 @@ class RecordingsPage(QWidget):
 
         page = QVBoxLayout(self)
         page.addWidget(where)
-        empty, self.empty_text = forms.empty("No recordings on the phone", "")
+        empty, self.empty_text = forms.empty("No recordings yet", "")
         self.body = QStackedWidget()
         self.body.addWidget(self.table)
         self.body.addWidget(empty)
@@ -138,19 +264,21 @@ class RecordingsPage(QWidget):
     # ---- state ----
 
     def _ready(self):
+        """The phone (or card) can be used now."""
         return bool(self.dest()) and self.state.has_target() and not self.state.busy
 
     def _buttons(self):
         ok = self._ready()
         for b in (self.refresh_btn, self.pull_btn, self.free_btn):
             b.setEnabled(ok)
+        chosen = bool(self.selected_rows())
         self.mix_btn.setEnabled(bool(self.dest()))          # works on the copies here: no phone needed
-        if not self.state.has_target():
-            self.note.setText("Choose a phone or card on the Phone page first.")
+        self.delete_btn.setEnabled(bool(self.dest()) and chosen and not self.state.busy)
 
     def _target_changed(self):
         self.body.setCurrentIndex(0)
         self.table.setRowCount(0)
+        self.rows = []
         self.summary.setText("")
         self.loaded_once = False          # looked at again the next time the page is shown
         self._buttons()
@@ -165,13 +293,14 @@ class RecordingsPage(QWidget):
     def showEvent(self, e):
         if e is not None:
             super().showEvent(e)
-        if not self.loaded_once and self._ready():
+        if not self.loaded_once and self.dest() and not self.state.busy:
             self.loaded_once = True
             self.refresh()
 
     def _start(self, text, what, bar=True):
         if not self.state.begin(what):
             return False
+        self.mine = True
         self._buttons()
         self.bar.setRange(0, 0)
         self.bar.setVisible(bar)
@@ -180,7 +309,9 @@ class RecordingsPage(QWidget):
         return True
 
     def _stop(self):
-        self.state.end()
+        if self.mine:                     # only a job this page started holds the phone
+            self.mine = False
+            self.state.end()
         self.bar.hide()
         self._buttons()
 
@@ -193,23 +324,43 @@ class RecordingsPage(QWidget):
 
     # ---- list ----
 
-    def refresh(self, after=""):
-        if not self._ready():
-            return
-        srcs = self._sources()
-        if srcs is None:
-            return
+    def refresh(self, after="", loud=False):
+        """Looks at the phone and this computer, or with no phone chosen (or the phone busy with another job)
+        at this computer alone. A phone that can't be reached shows what is here, and says why."""
         dest = self.dest()
-        self.after = after
-        if self._start("Looking at the card\u2026", "looking at the recordings"):
-            worker.run(lambda: recordings.status(srcs, dest), self._listed, self._failed)
+        if not dest:
+            return
+        self.after, self.loud = after, loud
+        if not self._ready():
+            if self.state.busy:
+                return                    # looked at once the phone is free (_phone_free)
+            worker.run(lambda: dict(recordings.status([], dest, here_too=True), phone=False), self._listed,
+                       self._failed)
+            return
+        state = self.state
+        if self._start("Looking at the card…", "looking at the recordings"):
+            def work():
+                try:
+                    return dict(recordings.status(state.sources(), dest, here_too=True), phone=True)
+                except (Exception, SystemExit) as e:    # unplugged, asleep, card gone: what is here can still be shown
+                    why = str(e.code if isinstance(e, SystemExit) else e) or "it stopped"
+                    return dict(recordings.status([], dest, here_too=True), phone=False, error=why)
+            worker.run(work, self._listed, self._failed)
+
+    def selected_rows(self):
+        return [self.rows[n] for n in sorted({i.row() for i in self.table.selectedIndexes()}) if n < len(self.rows)]
 
     def _listed(self, st):
         self._stop()
         dest = self.dest()
+        keep = {r["id"] for r in self.selected_rows()}
         rows = group_items(st["items"])
         self.rows = rows
+        self.listed_phone = st.get("phone", False)
+        self.table.blockSignals(True)
+        self.table.clearSelection()
         self.table.setRowCount(len(rows))
+        chosen = QItemSelection()
         for n, r in enumerate(rows):
             what = KINDS.get(r["kind"], r["kind"]) + (", locked" if r["locked"] else "")
             names = [n for n in recordings.sound_channels(dest, r["base"]) if n] if r["kind"] == "sound" else []
@@ -217,37 +368,92 @@ class RecordingsPage(QWidget):
                 what += ": " + " / ".join(names)
             here = ("being recorded" if r["busy"] else "yes" if r["pulled"]
                     else "copied before, deleted here" if r["pulled_before"] else "not yet")
+            phone = ("yes" if r["on_card"] else "no") if self.listed_phone else "—"
             cells = [r["when"].strftime("%a %d %b %Y  %H:%M:%S") if r["when"] else "?", what,
-                     " + ".join(sorted(r["files"])), _mb(r["size"]), here]
+                     " + ".join(sorted(r["files"])), _mb(r["size"]), phone, here]
             for c, text in enumerate(cells):
                 self.table.setItem(n, c, QTableWidgetItem(text))
-        new = [r for r in rows if not r["pulled"] and not r["pulled_before"] and not r["busy"]]
-        total = sum(r["size"] for r in rows)
+            if r["id"] in keep:
+                chosen.select(self.table.model().index(n, 0), self.table.model().index(n, len(COLUMNS) - 1))
+        self.table.selectionModel().select(chosen, QItemSelectionModel.Select)
+        self.table.blockSignals(False)
+        self._buttons()
+        on_card = [r for r in rows if r["on_card"]]
+        new = [r for r in on_card if not r["pulled"] and not r["pulled_before"] and not r["busy"]]
+        only_here = [r for r in rows if not r["on_card"]]
         self.body.setCurrentIndex(0 if rows else 1)
         if not rows:
             self.summary.setText("")
             self.empty_text.setText("Clips, marks and trips the app records show up here, ready to copy to this computer."
-                                    if st["missing_sources"] < len(self._sources() or [1])
+                                    if not self.listed_phone or st["missing_sources"] < len(self.state.sources() if
+                                                                                            self.state.has_target() else [1])
                                     else "The app has not recorded anything yet: there is no dashcam folder on the card.")
+        elif self.listed_phone:
+            text = "%s on the card (%s); %s." % (
+                _n(len(on_card), "recording"), _mb(sum(r["size"] for r in on_card)),
+                "%d not on this computer yet (%s)" % (len(new), _mb(sum(r["size"] for r in new))) if new
+                else "all of them are on this computer")
+            if only_here:
+                text += " %s only on this computer." % _n(len(only_here), "more", "more")
+            self.summary.setText(text)
         else:
-            self.summary.setText("%d recordings on the card (%s); %s." % (
-                len(rows), _mb(total), "%d not on this computer yet (%s)" % (len(new), _mb(sum(r["size"] for r in new)))
-                if new else "all of them are on this computer"))
+            self.summary.setText("%s on this computer (%s)." % (_n(len(rows), "recording"), _mb(sum(r["size"] for r in rows))))
         self.pull_btn.setEnabled(self._ready() and bool(new))
-        self.note.setText(self.after)
+        note = self.after
+        if not self.state.has_target():
+            note = "Choose a phone or card on the Phone page to see what it holds too. " + note
+        if st.get("error"):
+            note = ("Couldn't look at the phone (%s), so this is what is on this computer. " % st["error"].strip()) + note
+            if self.loud:
+                self._error(st["error"])
+        self.note.setText(note.strip())
+        then, self.then_mix = self.then_mix, None
+        if then is not None:
+            self._mix_paths([p for p in (os.path.join(dest, *k.split("/")) for k in then if k.lower().endswith(".mp4"))
+                             if os.path.isfile(p)])
+
+    # ---- one row ----
+
+    def _menu(self, pos):
+        n = self.table.rowAt(pos.y())
+        if n < 0:
+            return
+        rows = self.selected_rows()
+        menu = QMenu(self)
+        show = menu.addAction(forms.SHOW_FILE)
+        show.setEnabled(bool(shown_file(self.dest(), self.rows[n])))
+        show.triggered.connect(lambda: self.reveal(n))
+        mix = menu.addAction("Mix and export…")
+        mix.setEnabled(any(r["kind"] in VIDEO_KINDS for r in rows))
+        mix.triggered.connect(self.mix)
+        menu.addSeparator()
+        delete = menu.addAction("Delete…")
+        delete.setEnabled(self.delete_btn.isEnabled())
+        delete.triggered.connect(self.delete)
+        menu.exec(self.table.viewport().mapToGlobal(pos))
+
+    def reveal(self, n):
+        """Picks out the row's file in Finder (Explorer); the folder when it isn't on this computer."""
+        if not 0 <= n < len(self.rows) or not self.dest():
+            return
+        p = shown_file(self.dest(), self.rows[n])
+        if p:
+            forms.reveal(p)
+        else:
+            self.note.setText("That one isn't on this computer%s." % (": Sync to PC copies it" if self.rows[n]["on_card"] else ""))
 
     # ---- pull ----
 
-    def pull(self):
+    def pull(self, only=None):
         srcs = self._sources()
         if srcs is None:
             return
         dest = self.dest()
-        if not self._start("Copying\u2026", "copying recordings"):
+        if not self._start("Copying…", "copying recordings"):
             return
 
         def work(report):
-            return recordings.pull(srcs, dest, log=lambda m: None,
+            return recordings.pull(srcs, dest, log=lambda m: None, only=only,
                                    progress=lambda i, n, d, t, key: report((i, n, d, t, key), None))
         worker.run(work, self._pulled, self._failed, progress=self._progress)
 
@@ -267,19 +473,93 @@ class RecordingsPage(QWidget):
     # ---- mix and export ----
 
     def selected_clips(self):
-        """The copies here of the selected rows that are dashcam clips."""
-        dest = self.dest()
-        out = []
-        for row in sorted({i.row() for i in self.table.selectedIndexes()}):
-            r = self.rows[row] if row < len(self.rows) else None
-            if r and r["kind"] == "clip" and dest:
-                p = os.path.join(dest, "clips", r["base"] + ".mp4")
-                if os.path.exists(p):
-                    out.append(p)
-        return out
+        """The copies here of the selected rows' videos (dashcam clips and marks)."""
+        return videos(self.dest(), self.selected_rows())[0] if self.dest() else []
 
     def mix(self):
-        MixDialog(self, self.selected_clips(), self.dest()).exec()
+        dest = self.dest()
+        rows = self.selected_rows()
+        if not rows:
+            box = QMessageBox(QMessageBox.Information, "Mix and export",
+                              "Select the clips to mix in the list first: click one, and Shift-click or %s-click "
+                              "to add more." % ("⌘" if sys.platform == "darwin" else "Ctrl"), QMessageBox.Ok, self)
+            choose = box.addButton("Choose files…", QMessageBox.ActionRole)
+            box.exec()
+            if box.clickedButton() is choose:
+                MixDialog(self, [], dest).exec()
+            return
+        here, missing = videos(dest, rows)
+        if not here and not missing:
+            QMessageBox.information(self, "Mix and export", "Mix and export makes videos from dashcam clips and "
+                                    "marks; none is selected.")
+            return
+        if missing:
+            if not self._ready():
+                if not here:
+                    QMessageBox.information(self, "Mix and export", "The selected clips aren't on this computer yet. "
+                                            "Connect the phone and Sync to PC first.")
+                    return
+            else:
+                ans = QMessageBox.question(
+                    self, "Mix and export", "%s of the selected clips %s on the phone only. Copy %s here first?"
+                    % (len(missing), "is" if len(missing) == 1 else "are", "it" if len(missing) == 1 else "them"),
+                    QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel, QMessageBox.Yes)
+                if ans == QMessageBox.Cancel:
+                    return
+                if ans == QMessageBox.Yes:
+                    # the whole recording comes: a clip's .srt and .gcsv with its .mp4
+                    need = {(i["group"], i["base"]) for i in missing}
+                    keys = [i["key"] for r in rows if r["id"] in need for i in r["items"]
+                            if i.get("on_card", True) and not i["pulled"]]
+                    self.then_mix = keys + [os.path.relpath(p, dest).replace(os.sep, "/") for p in here]
+                    self.pull(only=set(keys))
+                    if not self.state.busy:     # it didn't start
+                        self.then_mix = None
+                    return
+        self._mix_paths(here)
+
+    def _mix_paths(self, clips):
+        if clips:
+            MixDialog(self, clips, self.dest()).exec()
+
+    # ---- delete ----
+
+    def delete(self):
+        rows = [r for r in self.selected_rows() if not r["busy"]]
+        dest = self.dest()
+        if not rows or not dest:
+            if self.selected_rows():
+                self.note.setText("A recording still being made can't be deleted.")
+            return
+        dlg = DeleteDialog(self, rows, dest, phone_ok=self._ready() and self.listed_phone)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        here = [i["key"] for i in dlg.here] if dlg.cb_here.isChecked() else []
+        card = list(dlg.card) if dlg.cb_card.isChecked() else []
+        srcs = self._sources() if card else []
+        if srcs is None:
+            return
+
+        def work():
+            out = {"here": recordings.delete_here(dest, here, remove=forms.to_trash) if here else None}
+            out["card"] = recordings.delete_from_card(srcs, card) if card else None
+            return out
+        if card:
+            if not self._start("Deleting from the phone…", "deleting recordings"):
+                return
+        worker.run(work, self._deleted, self._failed)
+
+    def _deleted(self, r):
+        self._stop()
+        msg = []
+        if r["here"]:
+            msg.append("Moved %s (%s) to %s." % (_n(r["here"]["deleted"], "file"), _mb(r["here"]["freed"]), forms.TRASH))
+        if r["card"]:
+            msg.append("Deleted %s from the phone, %s freed." % (_n(r["card"]["deleted"], "file"), _mb(r["card"]["freed"])))
+            if r["card"]["kept_changed"]:
+                msg.append("%s changed since the list was made, so %s kept."
+                           % (_n(r["card"]["kept_changed"], "file"), "it was" if r["card"]["kept_changed"] == 1 else "they were"))
+        self.refresh(after=" ".join(msg))
 
     # ---- free up ----
 
@@ -297,7 +577,7 @@ class RecordingsPage(QWidget):
             return
         keep_locked = not locked.isChecked()
         dest = self.dest()
-        if self._start("Deleting copied recordings from the card\u2026", "freeing up the card"):
+        if self._start("Deleting copied recordings from the card…", "freeing up the card"):
             worker.run(lambda: recordings.delete_pulled(srcs, dest, keep_locked=keep_locked, log=lambda m: None),
                        self._freed, self._failed)
 
@@ -318,6 +598,7 @@ class RecordingsPage(QWidget):
     def _failed(self, msg):
         self._stop()
         self.note.setText("")
+        self.then_mix = None
         self._error(msg)
 
     def _error(self, msg):

@@ -89,6 +89,49 @@ class RecordingsTest(unittest.TestCase):
         self.assertFalse(st["clips/000001_20261101_101500.mp4"]["pulled"])
         self.assertTrue(st["clips/000001_20261101_101500.mp4"]["pulled_before"])
 
+    def test_copies_here_are_listed_after_the_card_lets_them_go(self):
+        recordings.pull([self.card], self.dest, log=lambda m: None)
+        recordings.delete_pulled([self.card], self.dest, log=lambda m: None)       # the locked clip stays
+        write(os.path.join(self.dest, "clips", "notes.txt"), b"not a recording")
+        st = {i["key"]: i for i in recordings.status([self.card], self.dest, here_too=True)["items"]}
+        self.assertEqual(len(st), 7)
+        gone = st["clips/000001_20261101_101500.mp4"]
+        self.assertEqual((gone["on_card"], gone["pulled"], gone["source"], gone["remote"]), (False, True, None, None))
+        kept = st["clips/000002_20261101_102000_L.mp4"]
+        self.assertTrue(kept["on_card"] and kept["pulled"])
+        self.assertTrue(kept["remote"].endswith("/Dashcam/000002_20261101_102000_L.mp4"))
+        # with no phone, only what is here
+        self.assertEqual(len(recordings.status([], self.dest, here_too=True)["items"]), 7)
+        self.assertEqual(len(recordings.status([self.card], self.dest)["items"]), 2)       # as before: the card only
+
+    def test_pull_only_some(self):
+        r = recordings.pull([self.card], self.dest, log=lambda m: None,
+                            only={"clips/000001_20261101_101500.mp4", "trips/trip_20261101_101500.csv"})
+        self.assertEqual(r["pulled"], 2)
+        self.assertEqual(sorted(recordings.local_files(self.dest)),
+                         ["clips/000001_20261101_101500.mp4", "trips/trip_20261101_101500.csv"])
+
+    def test_delete_here_keeps_the_note_that_it_was_copied(self):
+        recordings.pull([self.card], self.dest, log=lambda m: None)
+        gone = []
+        r = recordings.delete_here(self.dest, ["clips/000001_20261101_101500.mp4", "clips/missing.mp4"],
+                                   remove=lambda p: (gone.append(p), os.remove(p)))
+        self.assertEqual((r["deleted"], r["freed"], len(gone)), (1, 1000, 1))
+        self.assertEqual(recordings.pull([self.card], self.dest, log=lambda m: None)["pulled"], 0)     # not fetched again
+
+    def test_delete_from_card_takes_what_was_listed_copied_or_not(self):
+        items = recordings.status([self.card], self.dest)["items"]
+        clip = [i for i in items if i["base"] == "000001_20261101_101500"]
+        r = recordings.delete_from_card([self.card], clip)
+        self.assertEqual((r["deleted"], r["freed"]), (3, 1030))
+        self.assertFalse(os.path.exists(self.cam + "/000001_20261101_101500.mp4"))
+        self.assertTrue(os.path.exists(self.cam + "/000002_20261101_102000_L.mp4"))
+        # a file that changed since it was listed stays; one already gone is skipped
+        trip = [i for i in items if i["kind"] == "trip"]
+        write(self.cam + "/trips/trip_20261101_101500.csv", b"t,1\nt,2\n")
+        self.assertEqual(recordings.delete_from_card([self.card], trip + clip)["kept_changed"], 1)
+        self.assertTrue(os.path.exists(self.cam + "/trips/trip_20261101_101500.csv"))
+
 
 if __name__ == "__main__":
     unittest.main()
