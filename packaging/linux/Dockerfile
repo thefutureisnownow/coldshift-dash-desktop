@@ -1,7 +1,7 @@
 # Where the Linux AppImage is built (packaging/build-linux.sh), on the oldest Ubuntu the Qt packages install on: 22.04
 # for x86_64, 24.04 for aarch64 (whose PySide6 wheels need its newer C library). BASE chooses; Python 3.12 comes from
 # the deadsnakes archive on 22.04 and is the system's own on 24.04. The X and Wayland libraries are here so that PyInstaller finds
-# them and puts them in the AppImage.
+# them and puts them in the AppImage; PulseAudio's client and XRandR are Qt Multimedia's (the player in Mix and export).
 ARG BASE=ubuntu:22.04
 FROM ${BASE}
 ARG ARCH=x86_64
@@ -16,6 +16,7 @@ RUN apt-get update \
       libx11-6 libx11-xcb1 libxcb1 libxcb-cursor0 libxcb-glx0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
       libxcb-randr0 libxcb-render0 libxcb-render-util0 libxcb-shape0 libxcb-shm0 libxcb-sync1 libxcb-util1 \
       libxcb-xfixes0 libxcb-xinerama0 libxcb-xkb1 \
+      libpulse0 libxrandr2 \
  && rm -rf /var/lib/apt/lists/*
 # The AppImage tools, pinned by hash. appimagetool is unpacked, as a container has no FUSE to run it directly.
 RUN set -eu; \
