@@ -21,7 +21,7 @@ def make_clip(path, seconds=2, left_hz=440, right_hz=None, video=True):
         cmd += ["-filter_complex", "[%d:a][%d:a]join=inputs=2:channel_layout=stereo[a]" % (a, a + 1),
                 "-map", "[a]"] + (["-map", "0:v"] if video else [])
     if video:
-        cmd += ["-c:v", "libx264", "-pix_fmt", "yuv420p"]
+        cmd += ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-g", "30"]      # a keyframe a second, as the dashcam
     cmd += ["-c:a", "aac", "-b:a", "128k", path]
     subprocess.run(cmd, check=True)
 
@@ -106,6 +106,40 @@ class ExportTest(unittest.TestCase):
         make_clip(mono)
         with self.assertRaises(mixdown.MixError):
             mixdown.export([self.a, mono], os.path.join(self.tmp, "x.mp4"))
+
+    def test_a_part_across_two_clips(self):
+        out = os.path.join(self.tmp, "part.mp4")
+        seen = []
+        r = mixdown.export([self.a, self.b], out, start=1.0, end=3.0, progress=lambda d, t: seen.append(t))
+        self.assertAlmostEqual(mixdown.probe(out)["duration"], 2, delta=0.3)
+        self.assertAlmostEqual(r["duration"], 2, delta=0.01)
+        self.assertEqual(set(seen), {r["duration"]})
+        with self.assertRaises(mixdown.MixError):
+            mixdown.export([self.a], out, start=1.8, end=2.1)
+
+    def test_trimmed(self):
+        self.assertEqual(mixdown.trimmed(10), (None, None))
+        self.assertEqual(mixdown.trimmed(10, 0, 10), (None, None))
+        self.assertEqual(mixdown.trimmed(10, 2, None), (2, 8))
+        self.assertEqual(mixdown.trimmed(10, None, 4), (None, 4))
+        self.assertEqual(mixdown.trimmed(10, 3, 99), (3, 7))
+
+    def test_render_for_the_player(self):
+        wav = os.path.join(self.tmp, "mix.wav")
+        mixdown.render([self.a, self.b], wav, balance=-1)
+        import wave
+        with wave.open(wav) as w:
+            self.assertEqual(w.getnchannels(), 1)
+            self.assertAlmostEqual(w.getnframes() / w.getframerate(), 4, delta=0.3)
+        self.assertEqual([round(d) for d in mixdown.durations([self.a, self.b])], [2, 2])
+        # from the sound read out once: the same mix
+        raw, again = os.path.join(self.tmp, "raw.wav"), os.path.join(self.tmp, "again.wav")
+        mixdown.extract([self.a, self.b], raw)
+        with wave.open(raw) as w:
+            self.assertEqual(w.getnchannels(), 2)
+        self.assertAlmostEqual(mixdown.render([self.a, self.b], again, balance=-1, source=raw),
+                               mixdown.render([self.a, self.b], wav, balance=-1), delta=0.2)
+        self.assertLess(peak_db(again, "bandpass=f=1000:w=50"), -40)          # only the left tone, as asked
 
     def test_preview(self):
         wav = mixdown.preview(self.a, balance=1, seconds=1)

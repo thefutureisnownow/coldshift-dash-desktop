@@ -18,6 +18,8 @@ The app reaches the phone over a USB cable with adb (Android's debugging bridge)
 
 **Copy from phone** (on the Overview and in the Sync menu) goes the other way from a sync: the phone's look, voice packs, map and music replace this computer's, and its places, log book and recordings come too. Use it on a new computer before the first sync, or whenever the phone has the copy to keep. What this computer had is moved into `.previous` folders in the vehicle's folder, not deleted, and nothing on the phone changes. (On the command line: `pull-all`.)
 
+**Recordings** lists what the phone recorded and the copies on this computer, gathered into drives (a run of clips with their trip log), with a picture of each. Double-click one to show it in Finder (Explorer); select clips or a whole drive for **Mix and export**, which plays them joined with your mix of the engine and exhaust as the sound, draws the trip log's revs, speed and throttle under the picture, and exports the part you mark with Start here and End here. Delete takes recordings off this computer (to the Trash), the phone, or both.
+
 ## Running from source
 
 Python 3.11 or later:

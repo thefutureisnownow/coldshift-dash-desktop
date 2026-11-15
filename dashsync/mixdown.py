@@ -6,7 +6,7 @@ headphones). This makes that mix with a chosen balance, sets its level, and writ
 copied as it is (no re-encoding) and the sound in AAC. Several clips can be joined into one video on the way.
 
 - **Balance** runs from -1 (only the left channel) through 0 (both at full level) to +1 (only the right).
-- **Level:** the mix is measured first (EBU R128, ffmpeg's loudnorm in measuring mode), then turned up or down by
+- **Level:** the mix is measured first (EBU R128, ffmpeg's ebur128 with true peaks), then turned up or down by
   one fixed amount, so the revs keep their shape: to -14 LUFS (where YouTube plays things) when `normalize`,
   but never so far that the loudest peak goes above -1 dBTP. Without `normalize` it is only turned down, if a peak
   would go over.
@@ -70,14 +70,14 @@ def gains(balance):
     return min(1.0, 1.0 - b), min(1.0, 1.0 + b)
 
 
-def mix_filter(channels, balance, gain_db=0.0):
-    """The ffmpeg audio filter: the mix on both channels, then the level."""
+def mix_filter(channels, balance, gain_db=0.0, mono=False):
+    """The ffmpeg audio filter: the mix on both channels (or on one, `mono`), then the level."""
     if channels >= 2:
         gl, gr = gains(balance)
         mix = "%.3f*c0+%.3f*c1" % (gl, gr)
-        f = "pan=stereo|c0=%s|c1=%s" % (mix, mix)
     else:
-        f = "pan=stereo|c0=c0|c1=c0"
+        mix = "c0"
+    f = ("pan=mono|c0=%s" % mix) if mono else ("pan=stereo|c0=%s|c1=%s" % (mix, mix))
     return f + ",volume=%.2fdB" % gain_db
 
 
@@ -120,42 +120,65 @@ def _channels(paths):
     return infos, counts.pop()
 
 
-def measure(paths, channels, balance, seconds=None, tmpdir=None):
+def _from(start):
+    """ffmpeg's input arguments to begin `start` seconds in (before -i: a seek, to the keyframe before it when the
+    picture is copied; the dashcam makes one every second)."""
+    return ["-ss", "%.3f" % start] if start else []
+
+
+def measure(paths, channels, balance, seconds=None, tmpdir=None, start=None):
     """(loudness LUFS, true peak dBTP) of the mix at full level; None for either when it is silent."""
     own = tmpdir is None
     tmpdir = tmpdir or tempfile.mkdtemp(prefix="mixdown-")
     try:
-        cmd = [_need("ffmpeg"), "-hide_banner", "-nostdin"] + _inputs(paths, tmpdir)
+        cmd = [_need("ffmpeg"), "-hide_banner", "-nostdin"] + _from(start) + _inputs(paths, tmpdir)
         if seconds:
             cmd += ["-t", "%.2f" % seconds]
-        cmd += ["-map", "0:a:0", "-af", mix_filter(channels, balance) + ",loudnorm=print_format=json", "-f", "null", "-"]
+        # ebur128 reads what loudnorm's measuring pass does (the same figures) in a fifth of the time
+        cmd += ["-map", "0:a:0", "-af", mix_filter(channels, balance) + ",ebur128=peak=true:framelog=quiet",
+                "-f", "null", "-"]
         r = subprocess.run(cmd, capture_output=True, text=True, errors="replace")
         if r.returncode != 0:
             raise MixError("measuring the sound failed: %s" % (r.stderr or "").strip()[-300:])
-        m = re.search(r"\{[^{}]*\"input_i\"[^{}]*\}", r.stderr or "")
-        if not m:
-            return None, None
-        j = json.loads(m.group(0))
-        return _num(j.get("input_i")), _num(j.get("input_tp"))
+        summary = (r.stderr or "").rpartition("Summary:")[2]
+        i = re.search(r"\bI:\s+(-?[\d.]+|-?inf) LUFS", summary)
+        tp = re.search(r"\bPeak:\s+(-?[\d.]+|-?inf) dBFS", summary)
+        loudness = _num(i.group(1)) if i else None
+        if loudness is not None and loudness <= -70:
+            loudness = None                         # ebur128's floor: nothing above its gate, silence
+        return loudness, (_num(tp.group(1)) if tp else None)
     finally:
         if own:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-def export(paths, out, balance=0.0, normalize=True, progress=None):
-    """Writes `out` (.mp4): the clips joined in the order given, the picture copied, the sound mixed.
-    `progress(done_s, total_s)` is called as it goes. Returns {"out", "gain_db", "loudness", "peak", "duration"}."""
+def trimmed(total, start=None, end=None):
+    """(start, seconds) of the part to export from a joined length `total`; (None, None) for all of it."""
+    s = max(0.0, float(start or 0))
+    e = min(total, float(end)) if end else total
+    if e - s < 0.5:
+        raise MixError("the part to export is shorter than half a second")
+    return (s or None), (None if (s == 0 and e >= total) else e - s)
+
+
+def export(paths, out, balance=0.0, normalize=True, progress=None, start=None, end=None):
+    """Writes `out` (.mp4): the clips joined in the order given, the picture copied, the sound mixed; with
+    `start` and `end` (seconds into the joined clips) only that part. `progress(done_s, total_s)` is called as it
+    goes. Returns {"out", "gain_db", "loudness", "peak", "duration"}."""
     if not paths:
         raise MixError("no clips chosen")
     infos, channels = _channels(paths)
-    total = sum(i["duration"] for i in infos)
+    start, seconds = trimmed(sum(i["duration"] for i in infos), start, end)
+    total = seconds or sum(i["duration"] for i in infos) - (start or 0)
     tmpdir = tempfile.mkdtemp(prefix="mixdown-")
     part = out + ".part.mp4"
     try:
-        loudness, peak = measure(paths, channels, balance, tmpdir=tmpdir)
+        loudness, peak = measure(paths, channels, balance, seconds=seconds, tmpdir=tmpdir, start=start)
         g = level_gain(loudness, peak, normalize)
         os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
-        cmd = [_need("ffmpeg"), "-hide_banner", "-nostdin", "-y"] + _inputs(paths, tmpdir)
+        cmd = [_need("ffmpeg"), "-hide_banner", "-nostdin", "-y"] + _from(start) + _inputs(paths, tmpdir)
+        if seconds:
+            cmd += ["-t", "%.3f" % seconds]
         cmd += ["-map", "0:v:0?", "-map", "0:a:0", "-c:v", "copy", "-af", mix_filter(channels, balance, g),
                 "-c:a", "aac", "-b:a", AUDIO_BITRATE] + SAME_ON_BOTH + [
                 "-movflags", "+faststart", "-progress", "pipe:1", "-nostats", part]
@@ -201,6 +224,59 @@ def preview(path, balance=0.0, normalize=True, seconds=20.0, start=0.0):
         os.remove(wav)
         raise MixError("making the preview failed: %s" % (r.stderr or "").strip()[-300:])
     return wav
+
+
+def durations(paths):
+    """Each clip's length in seconds."""
+    return [probe(p)["duration"] for p in paths]
+
+
+def extract(paths, wav):
+    """The clips' sound joined, as recorded (every channel), into `wav`: read once from the videos, so the mix can
+    be made again from it in a moment each time the balance changes (render's `source`)."""
+    _channels(paths)
+    tmpdir = tempfile.mkdtemp(prefix="mixdown-")
+    part = wav + ".part.wav"
+    try:
+        r = subprocess.run([_need("ffmpeg"), "-hide_banner", "-nostdin", "-y"] + _inputs(paths, tmpdir) +
+                           ["-map", "0:a:0", "-vn", "-c:a", "pcm_s16le", part],
+                           capture_output=True, text=True, errors="replace")
+        if r.returncode != 0:
+            raise MixError("reading the clips' sound failed: %s" % (r.stderr or "").strip()[-300:])
+        os.replace(part, wav)
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        if os.path.exists(part):
+            os.remove(part)
+
+
+def render(paths, wav, balance=0.0, normalize=True, source=None):
+    """The mix of the clips joined, as `wav` (one channel: the same goes on both), at the level export gives it:
+    what the player in Mix and export plays beside the picture. With `source` (extract's WAV of the same clips)
+    it is made from that, much faster. Returns the dB added."""
+    if source:
+        import wave
+        with wave.open(source) as w:
+            channels = w.getnchannels()
+        paths = [source]
+    else:
+        _, channels = _channels(paths)
+    tmpdir = tempfile.mkdtemp(prefix="mixdown-")
+    try:
+        loudness, peak = measure(paths, channels, balance, tmpdir=tmpdir)
+        g = level_gain(loudness, peak, normalize)
+        part = wav + ".part.wav"
+        cmd = [_need("ffmpeg"), "-hide_banner", "-nostdin", "-y"] + _inputs(paths, tmpdir) + [
+            "-map", "0:a:0", "-af", mix_filter(channels, balance, g, mono=True), "-c:a", "pcm_s16le", part]
+        r = subprocess.run(cmd, capture_output=True, text=True, errors="replace")
+        if r.returncode != 0:
+            if os.path.exists(part):
+                os.remove(part)
+            raise MixError("making the mix failed: %s" % (r.stderr or "").strip()[-300:])
+        os.replace(part, wav)
+        return g
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 def default_name(paths):

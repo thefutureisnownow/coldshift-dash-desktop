@@ -415,6 +415,15 @@ def self_test(app):
     for title in w.titles:
         w.go(title)
         app.processEvents()
+    # Mix and export's player: Qt Multimedia must be in the build, with a backend that plays the dashcam's .mp4
+    from PySide6.QtMultimedia import QMediaFormat
+    from .mix_dialog import MixDialog
+    mix = MixDialog(w, [], None)
+    mix.show()
+    app.processEvents()
+    if not mix.player.isAvailable() or QMediaFormat.MPEG4 not in QMediaFormat().supportedFileFormats(QMediaFormat.Decode):
+        raise SystemExit("self-test: the video player in Mix and export can't play .mp4 in this build")
+    mix.done(0)
     QTimer.singleShot(1500, app.quit)
     app.exec()
     QThreadPool.globalInstance().waitForDone(5000)

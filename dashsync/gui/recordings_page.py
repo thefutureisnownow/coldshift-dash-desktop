@@ -6,24 +6,29 @@ from the phone, and all of them when the phone is not connected). A row is shown
 double-click; Mix and export takes the selected rows' videos; Delete takes the selected rows off this computer
 (to the Trash), the phone, or both. Selected rows stay selected when the list is looked at again.
 """
+import datetime
 import os
 import sys
 
-from PySide6.QtCore import QItemSelection, QItemSelectionModel, Qt
+from PySide6.QtCore import QSize, Qt
+from PySide6.QtGui import QFont, QIcon, QPixmap
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QDialog, QDialogButtonBox, QFileDialog, QGroupBox,
                                QHBoxLayout, QHeaderView, QLabel, QMenu, QMessageBox, QPushButton, QStackedWidget,
-                               QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
+                               QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
-from .. import paths, recordings
+from .. import drives, paths, recordings
 from . import forms, worker
 from .state import Progress
 from .mix_dialog import MixDialog
+from .thumbs import Thumbs
 
 KINDS = {"clip": "Clip", "mark": "Mark", "trip": "Trip log", "interior": "Interior shot", "sound": "Sound"}
 # which of a row's files Show in Finder picks out, first found
 SHOW_FIRST = (".mp4", ".wav", ".jpg", ".gpx", ".json", ".csv", ".srt", ".gcsv")
 VIDEO_KINDS = ("clip", "mark")
 COLUMNS = ["Recorded", "What", "Files", "Size", "On the phone", "On this computer"]
+ICON = QSize(80, 45)
+ROLE = Qt.UserRole                  # an item's ("drive", index into self.drives) or ("row", index into self.rows)
 
 
 def _mb(n):
@@ -60,6 +65,13 @@ def group_items(items):
         r["busy"] = r["busy"] or i["busy"]
         r["on_card"] = r["on_card"] or i.get("on_card", True)
     return sorted(rows.values(), key=lambda r: (r["when"] is not None, r["when"]), reverse=True)
+
+
+def _with_drives(st, dest):
+    """A listing with its rows gathered into drives (st["drives"]): done off the window's thread, since it reads
+    the clips' subtitles for their lengths."""
+    st["drives"] = drives.group(group_items(st["items"]), dest)
+    return st
 
 
 def local_path(dest, item):
@@ -179,20 +191,33 @@ class RecordingsPage(QWidget):
 
         self.summary = QLabel()
         self.summary.setWordWrap(True)
-        self.table = QTableWidget(0, len(COLUMNS))
-        self.table.setHorizontalHeaderLabels(COLUMNS)
-        hh = self.table.horizontalHeader()
+        self.table = QTreeWidget()
+        self.table.setColumnCount(len(COLUMNS))
+        self.table.setHeaderLabels(COLUMNS)
+        hh = self.table.header()
+        hh.setStretchLastSection(False)
         for c in range(len(COLUMNS)):
             hh.setSectionResizeMode(c, QHeaderView.Stretch if c == 0 else QHeaderView.ResizeToContents)
-        self.table.verticalHeader().hide()
+        self.table.setIconSize(ICON)
+        self.table.setUniformRowHeights(False)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.table.doubleClicked.connect(lambda index: self.reveal(index.row()))
-        self.table.setToolTip("Double-click: %s. Right-click for more." % forms.SHOW_FILE)
+        self.table.setExpandsOnDoubleClick(True)
+        self.table.itemDoubleClicked.connect(self._double_clicked)
+        self.table.setToolTip("A drive is a run of recordings with no long gap; select it to take all of them.\n"
+                              "Double-click a recording: %s. Right-click for more." % forms.SHOW_FILE)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._menu)
         self.table.itemSelectionChanged.connect(self._buttons)
+        self.table.itemExpanded.connect(lambda it: self._opened(it, True))
+        self.table.itemCollapsed.connect(lambda it: self._opened(it, False))
+        self.drives = []
+        self.open_drives = None           # ids of the drives shown open (None: the newest, at first)
+        self.row_items = {}               # row id -> its tree item, for pictures as they come
+        self.row_index = {}               # row id -> its index in self.rows
+        self.thumbs = Thumbs(self)
+        self.thumbs.ready.connect(self._thumb_ready)
 
         self.refresh_btn = QPushButton("Check card")
         self.refresh_btn.clicked.connect(lambda: self.refresh(loud=True))
@@ -277,8 +302,8 @@ class RecordingsPage(QWidget):
 
     def _target_changed(self):
         self.body.setCurrentIndex(0)
-        self.table.setRowCount(0)
-        self.rows = []
+        self.table.clear()
+        self.rows, self.drives, self.row_items = [], [], {}
         self.summary.setText("")
         self.loaded_once = False          # looked at again the next time the page is shown
         self._buttons()
@@ -334,49 +359,89 @@ class RecordingsPage(QWidget):
         if not self._ready():
             if self.state.busy:
                 return                    # looked at once the phone is free (_phone_free)
-            worker.run(lambda: dict(recordings.status([], dest, here_too=True), phone=False), self._listed,
-                       self._failed)
+            worker.run(lambda: _with_drives(dict(recordings.status([], dest, here_too=True), phone=False), dest),
+                       self._listed, self._failed)
             return
         state = self.state
         if self._start("Looking at the card…", "looking at the recordings"):
             def work():
                 try:
-                    return dict(recordings.status(state.sources(), dest, here_too=True), phone=True)
+                    st = dict(recordings.status(state.sources(), dest, here_too=True), phone=True)
                 except (Exception, SystemExit) as e:    # unplugged, asleep, card gone: what is here can still be shown
                     why = str(e.code if isinstance(e, SystemExit) else e) or "it stopped"
-                    return dict(recordings.status([], dest, here_too=True), phone=False, error=why)
+                    st = dict(recordings.status([], dest, here_too=True), phone=False, error=why)
+                return _with_drives(st, dest)
             worker.run(work, self._listed, self._failed)
 
     def selected_rows(self):
-        return [self.rows[n] for n in sorted({i.row() for i in self.table.selectedIndexes()}) if n < len(self.rows)]
+        """The rows selected, and all of each selected drive's, in the list's order."""
+        picked = set()
+        for it in self.table.selectedItems():
+            kind, n = it.data(0, ROLE)
+            if kind == "row":
+                picked.add(n)
+            elif n < len(self.drives):
+                picked.update(self.row_index[r["id"]] for r in self.drives[n]["rows"])
+        return [self.rows[n] for n in sorted(picked) if n < len(self.rows)]
+
+    def _opened(self, item, is_open):
+        kind, n = item.data(0, ROLE)
+        if kind == "drive" and n < len(self.drives) and self.open_drives is not None:
+            (self.open_drives.add if is_open else self.open_drives.discard)(self.drives[n]["id"])
+
+    def _double_clicked(self, item, _col):
+        kind, n = item.data(0, ROLE)
+        if kind == "row":
+            self.reveal(n)
 
     def _listed(self, st):
         self._stop()
         dest = self.dest()
-        keep = {r["id"] for r in self.selected_rows()}
-        rows = group_items(st["items"])
-        self.rows = rows
+        keep_rows = {r["id"] for r in self.selected_rows()}
+        keep_drives = {self.drives[it.data(0, ROLE)[1]]["id"] for it in self.table.selectedItems()
+                       if it.data(0, ROLE)[0] == "drive" and it.data(0, ROLE)[1] < len(self.drives)}
+        ds = st["drives"]
+        rows = [r for d in ds for r in d["rows"]]           # newest drive first, newest row first in each
+        self.rows, self.drives, self.row_items = rows, ds, {}
+        self.row_index = {r["id"]: n for n, r in enumerate(rows)}
         self.listed_phone = st.get("phone", False)
+        if self.open_drives is None and ds:
+            self.open_drives = {ds[0]["id"]}
         self.table.blockSignals(True)
-        self.table.clearSelection()
-        self.table.setRowCount(len(rows))
-        chosen = QItemSelection()
-        for n, r in enumerate(rows):
-            what = KINDS.get(r["kind"], r["kind"]) + (", locked" if r["locked"] else "")
-            names = [n for n in recordings.sound_channels(dest, r["base"]) if n] if r["kind"] == "sound" else []
-            if names:
-                what += ": " + " / ".join(names)
-            here = ("being recorded" if r["busy"] else "yes" if r["pulled"]
-                    else "copied before, deleted here" if r["pulled_before"] else "not yet")
-            phone = ("yes" if r["on_card"] else "no") if self.listed_phone else "—"
-            cells = [r["when"].strftime("%a %d %b %Y  %H:%M:%S") if r["when"] else "?", what,
-                     " + ".join(sorted(r["files"])), _mb(r["size"]), phone, here]
-            for c, text in enumerate(cells):
-                self.table.setItem(n, c, QTableWidgetItem(text))
-            if r["id"] in keep:
-                chosen.select(self.table.model().index(n, 0), self.table.model().index(n, len(COLUMNS) - 1))
-        self.table.selectionModel().select(chosen, QItemSelectionModel.Select)
+        self.table.clear()
+        index = {id(r): n for n, r in enumerate(rows)}
+        bold = QFont(self.table.font())
+        bold.setBold(True)
+        pictures = []
+        for dn, d in enumerate(ds):
+            top = QTreeWidgetItem(self._drive_cells(d))
+            top.setData(0, ROLE, ("drive", dn))
+            for c in range(len(COLUMNS)):
+                top.setFont(c, bold)
+            self.table.addTopLevelItem(top)
+            for r in d["rows"]:
+                n = index[id(r)]
+                it = QTreeWidgetItem(self._row_cells(r, dest))
+                it.setData(0, ROLE, ("row", n))
+                it.setSizeHint(0, QSize(0, ICON.height() + 4))
+                top.addChild(it)
+                self.row_items[r["id"]] = it
+                src = self._picture_of(r, dest)
+                icon = self.thumbs.icon(src) if src else None
+                it.setIcon(0, icon or self._blank())           # (a blank keeps the times in line)
+                if src:
+                    pictures.append(src)
+                if r["id"] in keep_rows and d["id"] not in keep_drives:
+                    it.setSelected(True)
+            cover = self._cover(d, dest)
+            if cover and self.thumbs.icon(cover):
+                top.setIcon(0, self.thumbs.icon(cover))
+            top.setSizeHint(0, QSize(0, ICON.height() + 4))
+            top.setExpanded(d["id"] in self.open_drives)
+            if d["id"] in keep_drives:
+                top.setSelected(True)
         self.table.blockSignals(False)
+        self.thumbs.want(pictures)
         self._buttons()
         on_card = [r for r in rows if r["on_card"]]
         new = [r for r in on_card if not r["pulled"] and not r["pulled_before"] and not r["busy"]]
@@ -414,14 +479,83 @@ class RecordingsPage(QWidget):
 
     # ---- one row ----
 
-    def _menu(self, pos):
-        n = self.table.rowAt(pos.y())
-        if n < 0:
+    def _drive_cells(self, d):
+        rows = d["rows"]
+        if d["start"] is None:
+            when = "Undated"
+        else:
+            a = rows[-1]["when"]
+            b = datetime.datetime.fromtimestamp(d["end"])
+            when = "%s  %s\u2013%s" % (a.strftime("%a %d %b %Y"), a.strftime("%H:%M"), b.strftime("%H:%M"))
+        counts = {}
+        for r in rows:
+            counts[r["kind"]] = counts.get(r["kind"], 0) + 1
+        names = {"clip": "clip", "mark": "mark", "trip": "trip log", "interior": "interior shot", "sound": "sound recording"}
+        what = ", ".join(_n(counts[k], names.get(k, k)) for k in ("clip", "mark", "sound", "interior", "trip", "tests")
+                         if k in counts)
+        on_card = sum(1 for r in rows if r["on_card"])
+        here = sum(1 for r in rows if r["pulled"])
+        phone = ("\u2014" if not self.listed_phone else "yes" if on_card == len(rows) else "no" if not on_card
+                 else "%d of %d" % (on_card, len(rows)))
+        mine = "yes" if here == len(rows) else "not yet" if not here else "%d of %d" % (here, len(rows))
+        return [when, what, "", _mb(sum(r["size"] for r in rows)), phone, mine]
+
+    def _row_cells(self, r, dest):
+        what = KINDS.get(r["kind"], r["kind"]) + (", locked" if r["locked"] else "")
+        names = [n for n in recordings.sound_channels(dest, r["base"]) if n] if r["kind"] == "sound" else []
+        if names:
+            what += ": " + " / ".join(names)
+        here = ("being recorded" if r["busy"] else "yes" if r["pulled"]
+                else "copied before, deleted here" if r["pulled_before"] else "not yet")
+        phone = ("yes" if r["on_card"] else "no") if self.listed_phone else "\u2014"
+        return [r["when"].strftime("%H:%M:%S") if r["when"] else "?", what,
+                " + ".join(sorted(r["files"])), _mb(r["size"]), phone, here]
+
+    def _blank(self):
+        if not hasattr(self, "_blank_icon"):
+            pm = QPixmap(ICON)
+            pm.fill(Qt.transparent)
+            self._blank_icon = QIcon(pm)
+        return self._blank_icon
+
+    @staticmethod
+    def _picture_of(r, dest):
+        """The file here whose small picture the row shows: a video's or a photo's."""
+        for i in r["items"]:
+            p = local_path(dest, i)
+            if i["name"].lower().endswith((".mp4", ".jpg")) and os.path.isfile(p):
+                return p
+        return None
+
+    def _cover(self, d, dest):
+        """The picture a drive shows: its middle clip's (the first is often still parked)."""
+        pics = [p for p in (self._picture_of(r, dest) for r in d["rows"] if r["kind"] == "clip") if p]
+        pics = pics or [p for p in (self._picture_of(r, dest) for r in d["rows"]) if p]
+        return pics[len(pics) // 2] if pics else None
+
+    def _thumb_ready(self, src):
+        icon = self.thumbs.icon(src)
+        if not icon:
             return
+        dest = self.dest()
+        for r in self.rows:
+            if self._picture_of(r, dest) == src and r["id"] in self.row_items:
+                self.row_items[r["id"]].setIcon(0, icon)
+        for dn, d in enumerate(self.drives):
+            if self._cover(d, dest) == src:
+                top = self.table.topLevelItem(dn)
+                if top:
+                    top.setIcon(0, icon)
+
+    def _menu(self, pos):
+        item = self.table.itemAt(pos)
+        if item is None:
+            return
+        kind, n = item.data(0, ROLE)
         rows = self.selected_rows()
         menu = QMenu(self)
         show = menu.addAction(forms.SHOW_FILE)
-        show.setEnabled(bool(shown_file(self.dest(), self.rows[n])))
+        show.setEnabled(kind == "row" and bool(shown_file(self.dest(), self.rows[n])))
         show.triggered.connect(lambda: self.reveal(n))
         mix = menu.addAction("Mix and export…")
         mix.setEnabled(any(r["kind"] in VIDEO_KINDS for r in rows))
